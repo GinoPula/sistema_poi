@@ -1,8 +1,8 @@
 import React, { useState, useEffect, useMemo } from 'react';
 import {
   LayoutDashboard, ListChecks, ClipboardEdit, FileText, Plus, Trash2,
-  Save, X, TrendingUp, DollarSign, Target, AlertCircle, CheckCircle2,
-  Calendar, Briefcase, Loader2, Edit3, Building2, Wallet, Filter, Download,
+  Save, X, TrendingUp, Wallet, Target, AlertCircle, CheckCircle2,
+  Calendar, Briefcase, Loader2, Edit3, Building2, Filter, Download,
   CalendarClock, MailOpen, Lock, Unlock, Send, Check, Clock, XCircle,
   User, LogOut, Shield, Eye, EyeOff, RefreshCw, FileSpreadsheet, Printer,
   Bell, History, Activity
@@ -59,7 +59,9 @@ function ts(fecha, hora) {
 // Áreas dentro de cada Centro de Costo (sub-nivel jerárquico)
 // Si un usuario tiene 'areas' definidas, solo accede a actividades de esas áreas dentro de su CC.
 // Si no tiene areas (null), accede a todas las áreas del CC.
-const AREAS_POR_CC = {
+// NOTA: Esta es la configuración INICIAL. En tiempo de ejecución, el admin puede agregar/eliminar
+// áreas y el cambio se persiste en window.storage. Ver hook useAreasPorCC.
+const AREAS_POR_CC_INICIAL = {
   'GESTIÓN PNC': ['GESTIÓN'],
   'UGEDEUS': ['UGEDEUS'],
   'UGERDES': [
@@ -68,6 +70,10 @@ const AREAS_POR_CC = {
   ],
   'UNINDEUS': ['UNINDEUS'],
 };
+
+// Compatibilidad: referencia mutable que se reemplaza dinámicamente desde el componente raíz
+// para que cualquier código legado que aún lea AREAS_POR_CC obtenga las áreas actualizadas.
+let AREAS_POR_CC = { ...AREAS_POR_CC_INICIAL };
 
 // Mapeo de área lógica → áreas físicas en la programación
 // Permite que un usuario con área "PNC-MAQUINARIAS" vea actividades de 3 áreas diferentes
@@ -255,8 +261,18 @@ export default function App() {
   const [reprogramaciones, setReprogramaciones] = useState([]);
   const [auditoria, setAuditoria] = useState([]);
   const [notificaciones, setNotificaciones] = useState([]);
+  const [areasPorCC, setAreasPorCC] = useState({ ...AREAS_POR_CC_INICIAL });
   const [currentUser, setCurrentUser] = useState(null);
   const [loading, setLoading] = useState(true);
+
+  // Sincroniza la referencia mutable AREAS_POR_CC para código legado
+  useEffect(() => { AREAS_POR_CC = areasPorCC; }, [areasPorCC]);
+
+  async function saveAreasPorCC(next) {
+    setAreasPorCC(next);
+    AREAS_POR_CC = next;
+    try { await window.storage.set('pnc_v2_areas', JSON.stringify(next), false); } catch (e) {}
+  }
 
   useEffect(() => { loadAll(); }, []);
 
@@ -271,6 +287,16 @@ export default function App() {
     try { const r = await window.storage.get('pnc_v2_reprogs', false); if (r) reprogs = JSON.parse(r.value); } catch (e) {}
     try { const r = await window.storage.get('pnc_v2_audit', false); if (r) audit = JSON.parse(r.value); } catch (e) {}
     try { const r = await window.storage.get('pnc_v2_notifs', false); if (r) notifs = JSON.parse(r.value); } catch (e) {}
+
+    // Cargar áreas custom desde storage; si no existe, usar las predefinidas
+    try {
+      const r = await window.storage.get('pnc_v2_areas', false);
+      if (r) {
+        const loaded = JSON.parse(r.value);
+        setAreasPorCC(loaded);
+        AREAS_POR_CC = loaded;
+      }
+    } catch (e) {}
 
     // Usuarios: siempre desde código (prototipo). En producción vendrá de la base.
     usrs = JSON.parse(JSON.stringify(USUARIOS_DEMO));
@@ -456,6 +482,8 @@ export default function App() {
               saveActivities={saveActivities}
               currentUser={currentUser}
               reprogramaciones={reprogramaciones}
+              areasPorCC={areasPorCC}
+              saveAreasPorCC={saveAreasPorCC}
               logAuditoria={logAuditoria} />
           )}
           {view === 'reprogramacion' && (
@@ -489,7 +517,18 @@ export default function App() {
           {view === 'modificaciones' && (
             <Modificaciones activities={activities} modifs={modifs} saveModifs={saveModifs} currentUser={currentUser} />
           )}
-          {view === 'reporte' && <Reporte activities={activities} progress={progress} modifs={modifs} currentUser={currentUser} />}
+          {view === 'reporte' && esAdmin(currentUser) && <Reporte activities={activities} progress={progress} modifs={modifs} currentUser={currentUser} />}
+          {view === 'reporte' && !esAdmin(currentUser) && (
+            <Card className="p-12 text-center">
+              <div className="text-5xl mb-3">🔒</div>
+              <div style={{ fontFamily: "'Fraunces', serif", fontSize: 22, fontWeight: 500, color: '#1E2A3A', marginBottom: 8 }}>
+                Acceso restringido
+              </div>
+              <p className="text-sm" style={{ color: '#7A6F5C' }}>
+                Este módulo está disponible únicamente para administradores del sistema.
+              </p>
+            </Card>
+          )}
           {view === 'periodos' && esAdmin(currentUser) && (
             <ConfigPeriodos periodos={periodos} savePeriodos={savePeriodos} logAuditoria={logAuditoria} />
           )}
@@ -687,7 +726,7 @@ function Sidebar({ view, setView, onReset, solicitudesPendientes, reprogPendient
     { id: 'reprogramacion', label: 'Reprogramación POI', icon: RefreshCw, roles: ['admin', 'responsable_cc'] },
     { id: 'seguimiento', label: 'Seguimiento mensual', icon: ClipboardEdit, roles: ['admin', 'responsable_cc'] },
     { id: 'modificaciones', label: 'Modif. presupuestales', icon: Wallet, roles: ['admin', 'lector', 'responsable_cc'] },
-    { id: 'reporte', label: 'Reporte mensual', icon: FileText, roles: ['admin', 'lector', 'responsable_cc'] },
+    { id: 'reporte', label: 'Reporte mensual', icon: FileText, roles: ['admin'] },
   ];
   const personalItems = [
     { id: 'notificaciones', label: 'Notificaciones', icon: Bell, badge: notifsNoLeidas, roles: ['admin', 'responsable_cc', 'lector'] },
@@ -908,28 +947,60 @@ function KPI({ icon: Icon, label, value, hint, highlight }) {
   );
 }
 
-function MesFiltro({ mesFiltro, setMesFiltro }) {
+function MesFiltro({ mesFiltro, setMesFiltro, modoMes, setModoMes }) {
+  // modoMes:
+  //   'individual' (Mensual) → mesFiltro=N → datos solo de ese mes
+  //   'acumulado' (Seguimiento al mes) → mesFiltro=N → enero hasta mes N
+  const modo = modoMes || 'individual';
+
+  // Garantizar que mesFiltro nunca sea 0 (ya no existe "acumulado anual")
+  useEffect(() => {
+    if (mesFiltro === 0) setMesFiltro(new Date().getMonth() + 1);
+  }, [mesFiltro, setMesFiltro]);
+
   return (
     <Card className="p-4 mb-6">
-      <div className="flex items-center gap-2 flex-wrap">
+      <div className="flex items-center gap-2 flex-wrap mb-2">
         <Calendar size={16} style={{ color: '#7A6F5C' }} />
-        <span className="text-xs uppercase tracking-wider font-medium mr-2" style={{ color: '#7A6F5C' }}>Periodo:</span>
-        <button onClick={() => setMesFiltro(0)}
+        <span className="text-xs uppercase tracking-wider font-medium mr-2" style={{ color: '#7A6F5C' }}>Modo:</span>
+
+        <button onClick={() => { setModoMes && setModoMes('individual'); if (mesFiltro === 0) setMesFiltro(new Date().getMonth() + 1); }}
           className="text-xs px-3 py-1.5 rounded-md font-medium transition-colors"
           style={{
-            background: mesFiltro === 0 ? '#1E2A3A' : '#F0E9D9',
-            color: mesFiltro === 0 ? '#F5F1E8' : '#1E2A3A',
+            background: modo === 'individual' ? '#C9A350' : '#F0E9D9',
+            color: '#1E2A3A',
           }}>
-          Todos los meses (acumulado)
+          Mensual
         </button>
-        <span className="text-xs mx-1" style={{ color: '#D5C9B0' }}>|</span>
+
+        <button onClick={() => { setModoMes && setModoMes('acumulado'); if (mesFiltro === 0) setMesFiltro(new Date().getMonth() + 1); }}
+          className="text-xs px-3 py-1.5 rounded-md font-medium transition-colors"
+          style={{
+            background: modo === 'acumulado' ? '#2D7A4E' : '#F0E9D9',
+            color: modo === 'acumulado' ? '#FFFFFF' : '#1E2A3A',
+          }}>
+          Seguimiento al mes
+        </button>
+      </div>
+
+      {/* Selector de meses */}
+      <div className="flex items-center gap-2 flex-wrap pt-2" style={{ borderTop: '1px dashed #E5DDD0' }}>
+        <span className="text-xs uppercase tracking-wider font-medium mr-2" style={{ color: '#7A6F5C' }}>
+          {modo === 'acumulado' ? 'Seguimiento hasta:' : 'Mes:'}
+        </span>
         {MESES.map((m, i) => (
           <button key={i} onClick={() => setMesFiltro(i + 1)}
             className="text-xs px-2.5 py-1.5 rounded-md font-medium transition-colors"
             style={{
-              background: mesFiltro === i + 1 ? '#C9A350' : '#FAF7F0',
-              color: mesFiltro === i + 1 ? '#1E2A3A' : '#1E2A3A',
-              border: mesFiltro === i + 1 ? '1px solid #C9A350' : '1px solid #E5DDD0',
+              background: mesFiltro === i + 1
+                ? (modo === 'acumulado' ? '#2D7A4E' : '#C9A350')
+                : '#FAF7F0',
+              color: mesFiltro === i + 1
+                ? (modo === 'acumulado' ? '#FFFFFF' : '#1E2A3A')
+                : '#1E2A3A',
+              border: mesFiltro === i + 1
+                ? `1px solid ${modo === 'acumulado' ? '#2D7A4E' : '#C9A350'}`
+                : '1px solid #E5DDD0',
             }}>
             {MESES_ABR[i]}
           </button>
@@ -946,9 +1017,17 @@ function MesFiltro({ mesFiltro, setMesFiltro }) {
 function Dashboard({ activities, progress, modifs, currentUser }) {
   const ccDisponibles = ccsVisibles(currentUser);
   const ccsVisible = CENTROS_COSTO.filter(c => ccDisponibles.includes(c.nombre));
-  const [mesFiltro, setMesFiltro] = useState(0); // 0 = todos, 1-12 = mes específico
-  const esAcumulado = mesFiltro === 0;
-  const mesLabel = esAcumulado ? 'Acumulado anual' : MESES[mesFiltro - 1];
+  const [mesFiltro, setMesFiltro] = useState(new Date().getMonth() + 1); // mes actual
+  const [modoMes, setModoMes] = useState('individual'); // 'individual' o 'acumulado'
+  // Casos:
+  // - modo individual + mesFiltro=0 → acumulado anual (todos los meses)
+  // - modo individual + mesFiltro=N → solo ese mes
+  // - modo acumulado + mesFiltro=N → enero hasta el mes N (inclusive)
+  const esAcumulado = modoMes === 'individual' && mesFiltro === 0;
+  const esAcumuladoHasta = modoMes === 'acumulado' && mesFiltro > 0;
+  const mesLabel = esAcumuladoHasta
+    ? `Seguimiento al mes de ${MESES[mesFiltro - 1].toLowerCase()}`
+    : `Mensual: ${MESES[mesFiltro - 1]}`;
 
   // Filtrar actividades según rol y área
   const actsVisibles = esResponsableCC(currentUser)
@@ -975,8 +1054,10 @@ function Dashboard({ activities, progress, modifs, currentUser }) {
   // PIA total (no cambia)
   const totalPIA = ccsVisible.reduce((s, c) => s + c.pia, 0);
 
-  // PIM: si mes específico, PIM al cierre de ese mes (mods hasta ese mes)
-  //      si todos, PIM final (todas las mods)
+  // PIM: aplica mods según el modo
+  //   - Acumulado anual: todas las mods
+  //   - Mes individual:  mods hasta ese mes (para ver el PIM al cierre del mes)
+  //   - Acumulado hasta: mods hasta el mes seleccionado
   const modsAplicables = esAcumulado
     ? modifsVisibles
     : modifsVisibles.filter(m => m.mes <= mesFiltro);
@@ -984,24 +1065,34 @@ function Dashboard({ activities, progress, modifs, currentUser }) {
   const totalPIM = totalPIA + totalModifs;
   const variacionPIM = totalPIA > 0 ? ((totalPIM - totalPIA) / totalPIA) * 100 : 0;
 
-  // Ejecución financiera: si mes, solo ese mes; si todos, acumulado anual
+  // Ejecución financiera según modo
+  //   - Acumulado anual:    todos los seguimientos
+  //   - Mes individual:     solo ese mes
+  //   - Acumulado hasta:    enero-mes (mes <= mesFiltro)
   const progAplicable = esAcumulado
     ? progVisibles
-    : progVisibles.filter(p => p.mes === mesFiltro);
+    : esAcumuladoHasta
+      ? progVisibles.filter(p => p.mes <= mesFiltro)
+      : progVisibles.filter(p => p.mes === mesFiltro);
   const totalEjecFin = progAplicable.reduce((s, p) => s + (Number(p.avanceFinanciero) || 0), 0);
 
-  // Programado financiero según filtro
+  // Programado financiero según modo
   let totalProgFin = 0;
   actsVisibles.forEach(a => {
     if (esAcumulado) {
       a.programacion.forEach(p => { totalProgFin += Number(p.financiera) || 0; });
+    } else if (esAcumuladoHasta) {
+      // Sumar enero hasta mesFiltro
+      for (let m = 0; m < mesFiltro; m++) {
+        totalProgFin += Number(a.programacion?.[m]?.financiera) || 0;
+      }
     } else {
       totalProgFin += Number(a.programacion?.[mesFiltro - 1]?.financiera) || 0;
     }
   });
   const ejecFinPct = totalProgFin > 0 ? (totalEjecFin / totalProgFin) * 100 : 0;
 
-  // Avance físico ponderado según filtro
+  // Avance físico ponderado según modo
   let totalMetaFis = 0, totalEjecFis = 0;
   actsVisibles.forEach(a => {
     if (esAcumulado) {
@@ -1010,6 +1101,18 @@ function Dashboard({ activities, progress, modifs, currentUser }) {
         totalMetaFis += meta;
         const ejec = progVisibles.filter(p => p.actividadId === a.id).reduce((s, p) => s + (Number(p.avanceFisico) || 0), 0);
         totalEjecFis += Math.min(ejec, meta);
+      }
+    } else if (esAcumuladoHasta) {
+      // Meta acumulada enero-mes y ejecución acumulada enero-mes
+      let metaAcum = 0;
+      for (let m = 0; m < mesFiltro; m++) {
+        metaAcum += Number(a.programacion?.[m]?.fisica) || 0;
+      }
+      if (metaAcum > 0) {
+        totalMetaFis += metaAcum;
+        const ejecAcum = progVisibles.filter(p => p.actividadId === a.id && p.mes <= mesFiltro)
+          .reduce((s, p) => s + (Number(p.avanceFisico) || 0), 0);
+        totalEjecFis += Math.min(ejecAcum, metaAcum);
       }
     } else {
       const metaMes = Number(a.programacion?.[mesFiltro - 1]?.fisica) || 0;
@@ -1093,10 +1196,10 @@ function Dashboard({ activities, progress, modifs, currentUser }) {
     <>
       <PageHeader title="Tablero general" subtitle="POI 2026 — Programa Nuestras Ciudades" />
 
-      <MesFiltro mesFiltro={mesFiltro} setMesFiltro={setMesFiltro} />
+      <MesFiltro mesFiltro={mesFiltro} setMesFiltro={setMesFiltro} modoMes={modoMes} setModoMes={setModoMes} />
 
       <div className="grid grid-cols-2 gap-4 mb-8">
-        <KPI icon={DollarSign} label="PIA institucional" value={fmtMoneyShort(totalPIA)} hint="presupuesto inicial" />
+        <KPI icon={Wallet} label="PIA institucional" value={fmtMoneyShort(totalPIA)} hint="presupuesto inicial" />
         <KPI icon={TrendingUp}
           label={esAcumulado ? 'PIM vigente' : `PIM al cierre de ${MESES[mesFiltro-1]}`}
           value={fmtMoneyShort(totalPIM)}
@@ -1137,7 +1240,7 @@ function Dashboard({ activities, progress, modifs, currentUser }) {
             Ejecución financiera mensual
           </div>
           <div className="text-xs mt-1" style={{ color: '#7A6F5C' }}>
-            Programado vs ejecutado (barra superpuesta) {!esAcumulado && `— Mes resaltado: ${MESES[mesFiltro-1]}`}
+            Programado vs ejecutado {!esAcumulado && `— Mes resaltado: ${MESES[mesFiltro-1]}`}
           </div>
         </div>
         <ResponsiveContainer width="100%" height={300}>
@@ -1172,7 +1275,7 @@ function Dashboard({ activities, progress, modifs, currentUser }) {
             Ejecución física mensual
           </div>
           <div className="text-xs mt-1" style={{ color: '#7A6F5C' }}>
-            Programado vs ejecutado (barra superpuesta) {!esAcumulado && `— Mes resaltado: ${MESES[mesFiltro-1]}`}
+            Programado vs ejecutado {!esAcumulado && `— Mes resaltado: ${MESES[mesFiltro-1]}`}
           </div>
         </div>
         <ResponsiveContainer width="100%" height={300}>
@@ -1322,9 +1425,13 @@ function colorEjecucionTenue(pct) {
 function CentrosCosto({ activities, progress, modifs, currentUser }) {
   const ccDisponibles = ccsVisibles(currentUser);
   const [ccSel, setCcSel] = useState(ccDisponibles[0] || CENTROS_COSTO[0].nombre);
-  const [mesFiltro, setMesFiltro] = useState(0);
-  const esAcumulado = mesFiltro === 0;
-  const mesLabel = esAcumulado ? 'Acumulado anual' : MESES[mesFiltro - 1];
+  const [mesFiltro, setMesFiltro] = useState(new Date().getMonth() + 1);
+  const [modoMes, setModoMes] = useState('individual');
+  const esAcumulado = modoMes === 'individual' && mesFiltro === 0;
+  const esAcumuladoHasta = modoMes === 'acumulado' && mesFiltro > 0;
+  const mesLabel = esAcumuladoHasta
+    ? `Seguimiento al mes de ${MESES[mesFiltro - 1].toLowerCase()}`
+    : `Mensual: ${MESES[mesFiltro - 1]}`;
 
   const cc = CENTROS_COSTO.find(c => c.nombre === ccSel);
 
@@ -1341,10 +1448,12 @@ function CentrosCosto({ activities, progress, modifs, currentUser }) {
   const pim = cc.pia + totalMods;
   const variacion = cc.pia > 0 ? ((pim - cc.pia) / cc.pia) * 100 : 0;
 
-  // Conteo de modificaciones del mes específico (no acumulado)
+  // Conteo de modificaciones según modo
   const modsMes = esAcumulado
     ? modifs.filter(m => m.centroCosto === ccSel)
-    : modifs.filter(m => m.centroCosto === ccSel && m.mes === mesFiltro);
+    : esAcumuladoHasta
+      ? modifs.filter(m => m.centroCosto === ccSel && m.mes <= mesFiltro)
+      : modifs.filter(m => m.centroCosto === ccSel && m.mes === mesFiltro);
 
   // Datos mensuales: prog/ejec físico y financiero por mes, con acumulados
   const data = MESES.map((mes, i) => {
@@ -1366,16 +1475,28 @@ function CentrosCosto({ activities, progress, modifs, currentUser }) {
     accEjecFin += d.ejecFin; d.accEjecFin = accEjecFin;
   });
 
-  // Marcar el mes seleccionado
-  data.forEach(d => { d.seleccionado = !esAcumulado && d.mesIdx === mesFiltro; });
+  // Marcar el mes seleccionado o el rango acumulado
+  data.forEach(d => {
+    if (esAcumuladoHasta) {
+      d.seleccionado = d.mesIdx <= mesFiltro;
+    } else {
+      d.seleccionado = !esAcumulado && d.mesIdx === mesFiltro;
+    }
+  });
 
-  // Cálculo de totales/parciales según filtro para las tarjetas KPI
+  // Cálculo de KPIs según modo
   let kpiProgFis, kpiProgFin, kpiEjecFis, kpiEjecFin;
   if (esAcumulado) {
     kpiProgFis = data.reduce((s, d) => s + d.progFis, 0);
     kpiProgFin = data.reduce((s, d) => s + d.progFin, 0);
     kpiEjecFis = data.reduce((s, d) => s + d.ejecFis, 0);
     kpiEjecFin = data.reduce((s, d) => s + d.ejecFin, 0);
+  } else if (esAcumuladoHasta) {
+    // Sumar enero a mesFiltro
+    kpiProgFis = data.slice(0, mesFiltro).reduce((s, d) => s + d.progFis, 0);
+    kpiProgFin = data.slice(0, mesFiltro).reduce((s, d) => s + d.progFin, 0);
+    kpiEjecFis = data.slice(0, mesFiltro).reduce((s, d) => s + d.ejecFis, 0);
+    kpiEjecFin = data.slice(0, mesFiltro).reduce((s, d) => s + d.ejecFin, 0);
   } else {
     const d = data[mesFiltro - 1];
     kpiProgFis = d.progFis;
@@ -1412,7 +1533,7 @@ function CentrosCosto({ activities, progress, modifs, currentUser }) {
         </div>
       </Card>
 
-      <MesFiltro mesFiltro={mesFiltro} setMesFiltro={setMesFiltro} />
+      <MesFiltro mesFiltro={mesFiltro} setMesFiltro={setMesFiltro} modoMes={modoMes} setModoMes={setModoMes} />
 
       <Card className="p-6 mb-6">
         <div className="flex items-start gap-4">
@@ -1432,7 +1553,7 @@ function CentrosCosto({ activities, progress, modifs, currentUser }) {
       </Card>
 
       <div className="grid grid-cols-2 gap-4 mb-6">
-        <KPI icon={DollarSign} label="PIA" value={fmtMoneyShort(cc.pia)} hint="Presupuesto inicial" />
+        <KPI icon={Wallet} label="PIA" value={fmtMoneyShort(cc.pia)} hint="Presupuesto inicial" />
         <KPI icon={TrendingUp}
           label={esAcumulado ? 'PIM' : `PIM al ${MESES[mesFiltro-1]}`}
           value={fmtMoneyShort(pim)}
@@ -1474,7 +1595,7 @@ function CentrosCosto({ activities, progress, modifs, currentUser }) {
               Ejecución física mensual
             </div>
             <div className="text-xs mt-1" style={{ color: '#7A6F5C' }}>
-              Programado vs ejecutado (barra superpuesta) {!esAcumulado && `— Mes resaltado: ${MESES[mesFiltro-1]}`}
+              Programado vs ejecutado {!esAcumulado && `— Mes resaltado: ${MESES[mesFiltro-1]}`}
             </div>
           </div>
           <div className="flex gap-4 text-xs">
@@ -1519,7 +1640,7 @@ function CentrosCosto({ activities, progress, modifs, currentUser }) {
               Ejecución financiera mensual
             </div>
             <div className="text-xs mt-1" style={{ color: '#7A6F5C' }}>
-              Programado vs ejecutado (barra superpuesta) {!esAcumulado && `— Mes resaltado: ${MESES[mesFiltro-1]}`}
+              Programado vs ejecutado {!esAcumulado && `— Mes resaltado: ${MESES[mesFiltro-1]}`}
             </div>
           </div>
           <div className="flex gap-4 text-xs">
@@ -1564,7 +1685,9 @@ function CentrosCosto({ activities, progress, modifs, currentUser }) {
               Detalle por actividad operativa
             </div>
             <div className="text-xs mt-1" style={{ color: '#7A6F5C' }}>
-              {esAcumulado ? 'Acumulado anual' : `Datos del mes de ${MESES[mesFiltro-1]}`}
+              {esAcumuladoHasta
+                ? `Seguimiento al mes de ${MESES[mesFiltro-1].toLowerCase()} (enero – ${MESES[mesFiltro-1].toLowerCase()})`
+                : `Datos del mes de ${MESES[mesFiltro-1]}`}
             </div>
           </div>
           <Pill bg={esAcumulado ? '#F0E9D9' : '#FBF1D9'} color={esAcumulado ? '#1E2A3A' : '#9C7A2B'}>
@@ -1677,7 +1800,7 @@ function CentrosCosto({ activities, progress, modifs, currentUser }) {
 /* ============================================================
    PROGRAMACIÓN POI
 ============================================================ */
-function Programacion({ activities, saveActivities, currentUser, reprogramaciones = [], logAuditoria }) {
+function Programacion({ activities, saveActivities, currentUser, reprogramaciones = [], areasPorCC, saveAreasPorCC, logAuditoria }) {
   const ccDisponibles = ccsVisibles(currentUser);
   const [editing, setEditing] = useState(null);
   const [showForm, setShowForm] = useState(false);
@@ -1685,6 +1808,36 @@ function Programacion({ activities, saveActivities, currentUser, reprogramacione
   const [filtroCC, setFiltroCC] = useState(esResponsableCC(currentUser) ? currentUser.centroCosto : 'TODOS');
   const [filtroArea, setFiltroArea] = useState('TODAS');
   const [verHistorial, setVerHistorial] = useState(null);
+  const [showGestionAreas, setShowGestionAreas] = useState(false);
+
+  // Usar areasPorCC dinámico si fue pasado por props; fallback al estático
+  const areasMap = areasPorCC || AREAS_POR_CC;
+
+  // Eliminar un área (con validación)
+  async function handleEliminarArea(cc, area) {
+    const conActividades = activities.filter(a => a.centroCosto === cc && a.area === area).length;
+    if (conActividades > 0) {
+      alert(`⚠️ No se puede eliminar el área "${area}" porque tiene ${conActividades} actividad${conActividades === 1 ? '' : 'es'} asociada${conActividades === 1 ? '' : 's'}.\n\nPrimero reasigne o elimine las actividades del área antes de continuar.`);
+      return;
+    }
+    if (!window.confirm(`¿Eliminar el área "${area}" del centro de costo "${cc}"?\n\nEsta acción no afecta ninguna actividad existente.`)) return;
+    const next = { ...areasMap, [cc]: (areasMap[cc] || []).filter(a => a !== area) };
+    if (saveAreasPorCC) await saveAreasPorCC(next);
+    if (filtroArea === area) setFiltroArea('TODAS');
+    if (logAuditoria) await logAuditoria('eliminar_area', `Eliminó área "${area}" del CC ${cc}`, { centroCosto: cc, area });
+  }
+
+  // Agregar área nueva
+  async function handleAgregarArea(cc, nuevaArea) {
+    const nombre = String(nuevaArea || '').trim().toUpperCase();
+    if (!nombre) { alert('Ingresa un nombre para el área'); return false; }
+    const existentes = (areasMap[cc] || []).map(a => a.toUpperCase());
+    if (existentes.includes(nombre)) { alert(`El área "${nombre}" ya existe en ${cc}`); return false; }
+    const next = { ...areasMap, [cc]: [...(areasMap[cc] || []), nombre].sort() };
+    if (saveAreasPorCC) await saveAreasPorCC(next);
+    if (logAuditoria) await logAuditoria('crear_area', `Creó área "${nombre}" en el CC ${cc}`, { centroCosto: cc, area: nombre });
+    return true;
+  }
 
   const visibleActivities = esResponsableCC(currentUser)
     ? filtrarActividadesUsuario(activities, currentUser)
@@ -1693,12 +1846,12 @@ function Programacion({ activities, saveActivities, currentUser, reprogramacione
   // Áreas disponibles según el CC seleccionado (combina predefinidas + en uso)
   const areasDisponiblesFiltro = useMemo(() => {
     if (filtroCC === 'TODOS') return [];
-    const predefinidas = AREAS_POR_CC[filtroCC] || [];
+    const predefinidas = areasMap[filtroCC] || [];
     const enUso = Array.from(new Set(
       visibleActivities.filter(a => a.centroCosto === filtroCC && a.area).map(a => a.area)
     ));
     return Array.from(new Set([...predefinidas, ...enUso])).sort();
-  }, [filtroCC, visibleActivities]);
+  }, [filtroCC, visibleActivities, areasMap]);
 
   // Reset área al cambiar CC
   useEffect(() => {
@@ -1842,16 +1995,30 @@ function Programacion({ activities, saveActivities, currentUser, reprogramacione
             {areasDisponiblesFiltro.map(area => {
               const count = visibleActivities.filter(a => a.centroCosto === filtroCC && a.area === area).length;
               return (
-                <button key={area} onClick={() => setFiltroArea(area)}
-                  className="text-xs px-3 py-1 rounded-md font-medium"
-                  style={{
-                    background: filtroArea === area ? '#C9A350' : '#F0E9D9',
-                    color: filtroArea === area ? '#1E2A3A' : '#1E2A3A',
-                  }}>
-                  {area} ({count})
-                </button>
+                <div key={area} className="inline-flex items-center rounded-md overflow-hidden" style={{ background: filtroArea === area ? '#C9A350' : '#F0E9D9' }}>
+                  <button onClick={() => setFiltroArea(area)}
+                    className="text-xs px-3 py-1 font-medium"
+                    style={{ color: '#1E2A3A' }}>
+                    {area} ({count})
+                  </button>
+                  {canEdit && (
+                    <button onClick={() => handleEliminarArea(filtroCC, area)}
+                      title={`Eliminar área "${area}"`}
+                      className="px-1.5 py-1 hover:bg-red-200 transition-colors"
+                      style={{ borderLeft: '1px solid rgba(0,0,0,0.1)', color: '#B33B3B' }}>
+                      ✕
+                    </button>
+                  )}
+                </div>
               );
             })}
+            {canEdit && (
+              <button onClick={() => setShowGestionAreas(true)}
+                className="text-xs px-3 py-1 rounded-md font-medium ml-auto"
+                style={{ background: '#1E2A3A', color: '#F5F1E8' }}>
+                ⚙ Gestionar áreas
+              </button>
+            )}
           </div>
         )}
       </Card>
@@ -1943,6 +2110,10 @@ function Programacion({ activities, saveActivities, currentUser, reprogramacione
       {showForm && editing && (
         <ActivityForm activity={editing} setActivity={setEditing} isNew={isNew}
           activities={activities}
+          areasMap={areasMap}
+          onAgregarArea={handleAgregarArea}
+          onEliminarArea={handleEliminarArea}
+          canEdit={canEdit}
           onSave={handleSave} onClose={() => { setShowForm(false); setEditing(null); }} />
       )}
 
@@ -1953,11 +2124,21 @@ function Programacion({ activities, saveActivities, currentUser, reprogramacione
           onClose={() => setVerHistorial(null)}
         />
       )}
+
+      {showGestionAreas && (
+        <GestionAreasModal
+          areasMap={areasMap}
+          activities={activities}
+          onAgregarArea={handleAgregarArea}
+          onEliminarArea={handleEliminarArea}
+          onClose={() => setShowGestionAreas(false)}
+        />
+      )}
     </>
   );
 }
 
-function ActivityForm({ activity, setActivity, isNew, onSave, onClose, activities = [] }) {
+function ActivityForm({ activity, setActivity, isNew, onSave, onClose, activities = [], areasMap, onAgregarArea, onEliminarArea, canEdit = false }) {
   function update(field, value) { setActivity({ ...activity, [field]: value }); }
   function updateProg(idx, field, value) {
     const p = [...activity.programacion];
@@ -1967,15 +2148,18 @@ function ActivityForm({ activity, setActivity, isNew, onSave, onClose, activitie
   const sumFis = activity.programacion.reduce((s, m) => s + (Number(m.fisica) || 0), 0);
   const sumFin = activity.programacion.reduce((s, m) => s + (Number(m.financiera) || 0), 0);
 
-  // Áreas disponibles para el CC seleccionado: combina AREAS_POR_CC (predefinidas)
+  // Mapa efectivo de áreas (dinámico si fue pasado por props)
+  const _areasMap = areasMap || AREAS_POR_CC;
+
+  // Áreas disponibles para el CC seleccionado: combina predefinidas dinámicas
   // con las áreas existentes en actividades de ese CC (para mostrar todas las usadas)
   const areasDisponibles = useMemo(() => {
-    const predefinidas = AREAS_POR_CC[activity.centroCosto] || [];
+    const predefinidas = _areasMap[activity.centroCosto] || [];
     const enUso = Array.from(new Set(
       activities.filter(a => a.centroCosto === activity.centroCosto && a.area).map(a => a.area)
     ));
     return Array.from(new Set([...predefinidas, ...enUso])).sort();
-  }, [activity.centroCosto, activities]);
+  }, [activity.centroCosto, activities, _areasMap]);
 
   // Responsables existentes (en todas las actividades, deduplicados)
   const responsablesExistentes = useMemo(() => {
@@ -1986,10 +2170,11 @@ function ActivityForm({ activity, setActivity, isNew, onSave, onClose, activitie
 
   const [modoArea, setModoArea] = useState('select'); // 'select' | 'nuevo'
   const [modoResp, setModoResp] = useState('select'); // 'select' | 'nuevo'
+  const [nuevaAreaInput, setNuevaAreaInput] = useState('');
 
   // Cuando cambia el CC, resetea el área si no está en la lista del nuevo CC
   function cambiarCC(nuevoCC) {
-    const nuevasAreas = AREAS_POR_CC[nuevoCC] || [];
+    const nuevasAreas = _areasMap[nuevoCC] || [];
     const enUso = Array.from(new Set(
       activities.filter(a => a.centroCosto === nuevoCC && a.area).map(a => a.area)
     ));
@@ -2000,6 +2185,31 @@ function ActivityForm({ activity, setActivity, isNew, onSave, onClose, activitie
       area: todas.includes(activity.area) ? activity.area : (todas[0] || ''),
     });
     setModoArea('select');
+  }
+
+  async function guardarNuevaArea() {
+    if (!onAgregarArea) {
+      // Modo fallback: solo establecer en la actividad sin persistir
+      if (nuevaAreaInput.trim()) update('area', nuevaAreaInput.trim().toUpperCase());
+      setModoArea('select');
+      return;
+    }
+    const ok = await onAgregarArea(activity.centroCosto, nuevaAreaInput);
+    if (ok) {
+      update('area', nuevaAreaInput.trim().toUpperCase());
+      setNuevaAreaInput('');
+      setModoArea('select');
+    }
+  }
+
+  async function eliminarAreaActual() {
+    if (!activity.area || !onEliminarArea) return;
+    await onEliminarArea(activity.centroCosto, activity.area);
+    // Si el área se eliminó exitosamente, limpiar el campo
+    const conActividades = activities.filter(a => a.centroCosto === activity.centroCosto && a.area === activity.area).length;
+    if (conActividades === 0 || (conActividades === 1 && !isNew && activity.id)) {
+      // No-op: la advertencia ya la dio onEliminarArea
+    }
   }
 
   return (
@@ -2020,25 +2230,40 @@ function ActivityForm({ activity, setActivity, isNew, onSave, onClose, activitie
           </Field>
           <Field label="Área / Unidad">
             {modoArea === 'select' ? (
-              <div className="flex gap-2">
+              <div className="flex gap-1">
                 <select value={activity.area} onChange={(e) => update('area', e.target.value)} className={inputCls} style={{ flex: 1 }}>
                   <option value="">— Selecciona un área —</option>
                   {areasDisponibles.map(a => <option key={a} value={a}>{a}</option>)}
                 </select>
-                <button type="button" onClick={() => { setModoArea('nuevo'); update('area', ''); }}
+                <button type="button" onClick={() => { setModoArea('nuevo'); setNuevaAreaInput(''); update('area', ''); }}
                   className="px-2.5 rounded-md text-xs font-semibold whitespace-nowrap"
                   style={{ background: '#C9A350', color: '#1E2A3A' }} title="Crear nueva área/unidad">
                   + Nueva
                 </button>
+                {canEdit && activity.area && onEliminarArea && (
+                  <button type="button" onClick={eliminarAreaActual}
+                    className="px-2.5 rounded-md text-xs font-semibold whitespace-nowrap"
+                    style={{ background: '#F5D5D5', color: '#B33B3B' }}
+                    title={`Eliminar área "${activity.area}"`}>
+                    ✕
+                  </button>
+                )}
               </div>
             ) : (
-              <div className="flex gap-2">
-                <input type="text" value={activity.area} onChange={(e) => update('area', e.target.value.toUpperCase())}
-                  placeholder="Nombre de la nueva área/unidad" className={inputCls} style={{ flex: 1 }} />
-                <button type="button" onClick={() => setModoArea('select')}
+              <div className="flex gap-1">
+                <input type="text" value={nuevaAreaInput} onChange={(e) => setNuevaAreaInput(e.target.value.toUpperCase())}
+                  placeholder="Nombre de la nueva área/unidad" className={inputCls} style={{ flex: 1 }}
+                  onKeyDown={(e) => { if (e.key === 'Enter') { e.preventDefault(); guardarNuevaArea(); } }} />
+                <button type="button" onClick={guardarNuevaArea}
+                  disabled={!nuevaAreaInput.trim()}
+                  className="px-2.5 rounded-md text-xs font-semibold whitespace-nowrap"
+                  style={{ background: '#2D7A4E', color: '#FFF', opacity: nuevaAreaInput.trim() ? 1 : 0.5 }}>
+                  ✓ Guardar
+                </button>
+                <button type="button" onClick={() => { setModoArea('select'); setNuevaAreaInput(''); }}
                   className="px-2.5 rounded-md text-xs font-semibold"
-                  style={{ background: '#F0E9D9', color: '#1E2A3A' }} title="Volver a seleccionar">
-                  ← Lista
+                  style={{ background: '#F0E9D9', color: '#1E2A3A' }} title="Cancelar">
+                  ←
                 </button>
               </div>
             )}
@@ -2132,6 +2357,126 @@ function ActivityForm({ activity, setActivity, isNew, onSave, onClose, activitie
           <button onClick={onClose} className="px-4 py-2 rounded-md text-sm" style={{ color: '#1E2A3A' }}>Cancelar</button>
           <button onClick={onSave} className="flex items-center gap-2 px-4 py-2 rounded-md text-sm font-semibold" style={{ background: '#1E2A3A', color: '#F5F1E8' }}>
             <Save size={14} /> Guardar
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function GestionAreasModal({ areasMap, activities, onAgregarArea, onEliminarArea, onClose }) {
+  const [ccSelected, setCcSelected] = useState(CENTROS_COSTO[0].nombre);
+  const [nuevaArea, setNuevaArea] = useState('');
+
+  // Áreas del CC seleccionado (predefinidas + en uso)
+  const areasDelCC = useMemo(() => {
+    const predefinidas = areasMap[ccSelected] || [];
+    const enUso = Array.from(new Set(activities.filter(a => a.centroCosto === ccSelected && a.area).map(a => a.area)));
+    return Array.from(new Set([...predefinidas, ...enUso])).sort();
+  }, [ccSelected, areasMap, activities]);
+
+  async function agregar() {
+    const ok = await onAgregarArea(ccSelected, nuevaArea);
+    if (ok) setNuevaArea('');
+  }
+
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center p-4" style={{ background: 'rgba(30,42,58,0.6)' }}>
+      <div className="rounded-lg max-w-3xl w-full max-h-[90vh] overflow-y-auto" style={{ background: '#FAF7F0' }}>
+        <div className="px-6 py-4 border-b flex items-center justify-between sticky top-0 z-10" style={{ background: '#FAF7F0', borderColor: '#E5DDD0' }}>
+          <div style={{ fontFamily: "'Fraunces', serif", fontSize: 22, fontWeight: 500, color: '#1E2A3A' }}>
+            ⚙ Gestión de Áreas / Unidades
+          </div>
+          <button onClick={onClose} className="p-1.5 rounded hover:bg-stone-200"><X size={18} /></button>
+        </div>
+
+        <div className="p-6">
+          <div className="mb-4 p-3 rounded text-xs" style={{ background: '#FBF1D9', borderLeft: '3px solid #C9A350', color: '#9C7A2B' }}>
+            <strong>ℹ️ Importante:</strong> No se puede eliminar un área si tiene actividades asociadas.
+            Primero reasigne o elimine las actividades del área antes de continuar.
+            Los cambios se reflejan en todos los módulos del sistema.
+          </div>
+
+          {/* Selector de CC */}
+          <Field label="Centro de Costo">
+            <select value={ccSelected} onChange={(e) => setCcSelected(e.target.value)} className={inputCls}>
+              {CENTROS_COSTO.map(cc => <option key={cc.codigo} value={cc.nombre}>{cc.codigo} — {cc.nombre}</option>)}
+            </select>
+          </Field>
+
+          {/* Agregar nueva área */}
+          <div className="mt-4">
+            <label className="text-[11px] font-semibold uppercase tracking-widest mb-1 block" style={{ color: '#7A6F5C' }}>
+              Agregar nueva área en {ccSelected}
+            </label>
+            <div className="flex gap-2">
+              <input type="text" value={nuevaArea} onChange={(e) => setNuevaArea(e.target.value.toUpperCase())}
+                placeholder="Nombre de la nueva área (ej: PIP CUSCO)"
+                className={inputCls} style={{ flex: 1 }}
+                onKeyDown={(e) => { if (e.key === 'Enter') agregar(); }} />
+              <button onClick={agregar}
+                disabled={!nuevaArea.trim()}
+                className="px-4 py-2 rounded-md text-sm font-semibold"
+                style={{ background: '#C9A350', color: '#1E2A3A', opacity: nuevaArea.trim() ? 1 : 0.5 }}>
+                + Agregar
+              </button>
+            </div>
+          </div>
+
+          {/* Lista de áreas existentes */}
+          <div className="mt-6">
+            <div className="text-[11px] font-semibold uppercase tracking-widest mb-2" style={{ color: '#7A6F5C' }}>
+              Áreas existentes en {ccSelected} ({areasDelCC.length})
+            </div>
+            {areasDelCC.length === 0 ? (
+              <div className="p-4 text-center text-sm rounded" style={{ background: '#F0E9D9', color: '#7A6F5C' }}>
+                No hay áreas registradas en este Centro de Costo.
+              </div>
+            ) : (
+              <table className="w-full text-sm">
+                <thead>
+                  <tr style={{ background: '#1E2A3A', color: '#F5F1E8' }}>
+                    <th className="p-3 text-left">Área / Unidad</th>
+                    <th className="p-3 text-right">Actividades asociadas</th>
+                    <th className="p-3 text-right">Acción</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {areasDelCC.map(area => {
+                    const count = activities.filter(a => a.centroCosto === ccSelected && a.area === area).length;
+                    return (
+                      <tr key={area} style={{ borderBottom: '1px solid #E5DDD0', background: '#FFFFFF' }}>
+                        <td className="p-3 font-medium" style={{ color: '#1E2A3A' }}>{area}</td>
+                        <td className="p-3 text-right" style={{ color: count > 0 ? '#2D7A4E' : '#9C9080' }}>
+                          {count > 0 ? <strong>{count} activ{count === 1 ? 'idad' : 'idades'}</strong> : 'Sin actividades'}
+                        </td>
+                        <td className="p-3 text-right">
+                          <button onClick={() => onEliminarArea(ccSelected, area)}
+                            className="px-3 py-1 rounded-md text-xs font-semibold"
+                            style={{
+                              background: count > 0 ? '#F5D5D5' : '#FFCDCD',
+                              color: '#B33B3B',
+                              opacity: count > 0 ? 0.5 : 1,
+                              cursor: count > 0 ? 'not-allowed' : 'pointer',
+                            }}
+                            title={count > 0 ? `No se puede eliminar: tiene ${count} actividad${count === 1 ? '' : 'es'}` : 'Eliminar área'}>
+                            🗑️ Eliminar
+                          </button>
+                        </td>
+                      </tr>
+                    );
+                  })}
+                </tbody>
+              </table>
+            )}
+          </div>
+        </div>
+
+        <div className="px-6 py-4 border-t flex items-center justify-end" style={{ borderColor: '#E5DDD0' }}>
+          <button onClick={onClose}
+            className="px-4 py-2 rounded-md text-sm font-semibold"
+            style={{ background: '#1E2A3A', color: '#F5F1E8' }}>
+            Cerrar
           </button>
         </div>
       </div>
@@ -2731,6 +3076,8 @@ function Modificaciones({ activities, modifs, saveModifs, currentUser }) {
   const canEdit = esAdmin(currentUser);
   const [showForm, setShowForm] = useState(false);
   const [editing, setEditing] = useState(null);
+  const [filtroCC, setFiltroCC] = useState(esResponsableCC(currentUser) ? currentUser.centroCosto : 'TODOS');
+  const [filtroMes, setFiltroMes] = useState('TODOS');
 
   const areasUser = expandirAreasUsuario(currentUser);
   const visibleModifs = esResponsableCC(currentUser)
@@ -2746,6 +3093,19 @@ function Modificaciones({ activities, modifs, saveModifs, currentUser }) {
       })
     : modifs;
 
+  // Aplicar filtros del usuario
+  const filteredModifs = useMemo(() => {
+    let r = visibleModifs;
+    if (filtroCC !== 'TODOS') r = r.filter(m => m.centroCosto === filtroCC);
+    if (filtroMes !== 'TODOS') r = r.filter(m => Number(m.mes) === Number(filtroMes));
+    return r.sort((a, b) => String(b.fecha).localeCompare(String(a.fecha)));
+  }, [visibleModifs, filtroCC, filtroMes]);
+
+  // Reset mes si cambia CC y no hay datos
+  useEffect(() => {
+    setFiltroMes('TODOS');
+  }, [filtroCC]);
+
   const TIPOS = [
     'Tipo I - Créditos Suplementarios',
     'Tipo II - Reducción Presupuestal',
@@ -2760,29 +3120,60 @@ function Modificaciones({ activities, modifs, saveModifs, currentUser }) {
       fecha: new Date().toISOString().slice(0, 10),
       anio: 2026,
       mes: new Date().getMonth() + 1,
-      centroCosto: esResponsableCC(currentUser) ? currentUser.centroCosto : CENTROS_COSTO[0].nombre,
+      centroCosto: esResponsableCC(currentUser) ? currentUser.centroCosto : (filtroCC !== 'TODOS' ? filtroCC : CENTROS_COSTO[0].nombre),
+      area: 'TODAS',
       codigoAOI: '',
       tipo: TIPOS[2],
+      // Nuevo: clasificadores como arreglo con importe individual
+      clasificadores: [{ id: uid(), clasificador: '', importe: 0 }],
+      // Mantener compatibilidad con datos antiguos: clasificador único e importe agregado
       clasificador: '',
       importe: 0,
       concepto: '',
-      documento: '',
     });
     setShowForm(true);
   }
 
   function editModif(m) {
-    setEditing(JSON.parse(JSON.stringify(m)));
+    const copia = JSON.parse(JSON.stringify(m));
+    // Migración de datos antiguos: si no hay clasificadores[], crear uno desde clasificador+importe
+    if (!Array.isArray(copia.clasificadores) || copia.clasificadores.length === 0) {
+      copia.clasificadores = [{
+        id: uid(),
+        clasificador: copia.clasificador || '',
+        importe: Number(copia.importe) || 0,
+      }];
+    }
+    setEditing(copia);
     setShowForm(true);
   }
 
   async function handleSave() {
-    if (!editing.centroCosto || !editing.importe) {
-      alert('Centro de costo e importe son obligatorios');
+    if (!editing.centroCosto) {
+      alert('Centro de costo es obligatorio');
       return;
     }
-    const exists = modifs.find(x => x.id === editing.id);
-    const next = exists ? modifs.map(x => x.id === editing.id ? editing : x) : [...modifs, editing];
+    // Validar clasificadores
+    const clasifs = (editing.clasificadores || []).filter(c => c.clasificador && c.clasificador.trim() && Number(c.importe) > 0);
+    if (clasifs.length === 0) {
+      alert('Debes registrar al menos un clasificador con importe mayor a 0');
+      return;
+    }
+    // Calcular importe total a partir de los clasificadores
+    const totalImporte = clasifs.reduce((s, c) => s + (Number(c.importe) || 0), 0);
+    const clasifText = clasifs.map(c => `${c.clasificador} (S/ ${Number(c.importe).toFixed(2)})`).join(' | ');
+
+    const final = {
+      ...editing,
+      clasificadores: clasifs,
+      importe: totalImporte,
+      clasificador: clasifText, // Para compatibilidad/visualización
+    };
+    // Eliminar el campo documento si quedó
+    delete final.documento;
+
+    const exists = modifs.find(x => x.id === final.id);
+    const next = exists ? modifs.map(x => x.id === final.id ? final : x) : [...modifs, final];
     await saveModifs(next);
     setShowForm(false);
     setEditing(null);
@@ -2834,6 +3225,65 @@ function Modificaciones({ activities, modifs, saveModifs, currentUser }) {
         ))}
       </div>
 
+      {/* Filtros: CC + Mes */}
+      <Card className="p-4 mb-4">
+        <div className="flex items-center gap-3 flex-wrap">
+          <Filter size={16} style={{ color: '#7A6F5C' }} />
+          <span className="text-xs uppercase tracking-wider font-medium" style={{ color: '#7A6F5C' }}>Centro de costo:</span>
+          {!esResponsableCC(currentUser) && (
+            <button onClick={() => setFiltroCC('TODOS')}
+              className="text-xs px-3 py-1 rounded-md font-medium"
+              style={{
+                background: filtroCC === 'TODOS' ? '#1E2A3A' : '#F0E9D9',
+                color: filtroCC === 'TODOS' ? '#F5F1E8' : '#1E2A3A',
+              }}>Todos ({visibleModifs.length})</button>
+          )}
+          {CENTROS_COSTO.filter(c => ccDisponibles.includes(c.nombre)).map(cc => {
+            const count = visibleModifs.filter(m => m.centroCosto === cc.nombre).length;
+            return (
+              <button key={cc.codigo} onClick={() => setFiltroCC(cc.nombre)}
+                className="text-xs px-3 py-1 rounded-md font-medium"
+                style={{
+                  background: filtroCC === cc.nombre ? '#1E2A3A' : '#F0E9D9',
+                  color: filtroCC === cc.nombre ? '#F5F1E8' : '#1E2A3A',
+                }}>
+                {cc.nombre} ({count})
+              </button>
+            );
+          })}
+        </div>
+
+        {/* Selector de mes: solo aparece cuando hay un CC específico */}
+        {filtroCC !== 'TODOS' && (
+          <div className="flex items-center gap-3 flex-wrap mt-3 pt-3" style={{ borderTop: '1px dashed #E5DDD0' }}>
+            <span className="text-xs uppercase tracking-wider font-medium" style={{ color: '#7A6F5C' }}>Mes:</span>
+            <button onClick={() => setFiltroMes('TODOS')}
+              className="text-xs px-3 py-1 rounded-md font-medium"
+              style={{
+                background: filtroMes === 'TODOS' ? '#C9A350' : '#F0E9D9',
+                color: '#1E2A3A',
+              }}>
+              Todos ({visibleModifs.filter(m => m.centroCosto === filtroCC).length})
+            </button>
+            {MESES.map((nom, i) => {
+              const mesNum = i + 1;
+              const count = visibleModifs.filter(m => m.centroCosto === filtroCC && Number(m.mes) === mesNum).length;
+              if (count === 0) return null;
+              return (
+                <button key={mesNum} onClick={() => setFiltroMes(mesNum)}
+                  className="text-xs px-3 py-1 rounded-md font-medium"
+                  style={{
+                    background: filtroMes === mesNum ? '#C9A350' : '#F0E9D9',
+                    color: '#1E2A3A',
+                  }}>
+                  {nom} ({count})
+                </button>
+              );
+            })}
+          </div>
+        )}
+      </Card>
+
       <Card>
         <div className="overflow-x-auto">
           <table className="w-full text-sm">
@@ -2843,25 +3293,40 @@ function Modificaciones({ activities, modifs, saveModifs, currentUser }) {
                 <th className="text-left px-4 py-3 text-xs uppercase tracking-wider" style={{ color: '#7A6F5C' }}>CC</th>
                 <th className="text-left px-4 py-3 text-xs uppercase tracking-wider" style={{ color: '#7A6F5C' }}>AOI</th>
                 <th className="text-left px-4 py-3 text-xs uppercase tracking-wider" style={{ color: '#7A6F5C' }}>Tipo</th>
-                <th className="text-left px-4 py-3 text-xs uppercase tracking-wider" style={{ color: '#7A6F5C' }}>Clasificador</th>
+                <th className="text-left px-4 py-3 text-xs uppercase tracking-wider" style={{ color: '#7A6F5C' }}>Clasificadores</th>
                 <th className="text-right px-4 py-3 text-xs uppercase tracking-wider" style={{ color: '#7A6F5C' }}>Importe</th>
                 <th className="px-4 py-3"></th>
               </tr>
             </thead>
             <tbody>
-              {visibleModifs.length === 0 && (
+              {filteredModifs.length === 0 && (
                 <tr><td colSpan={7} className="text-center py-12 text-sm" style={{ color: '#7A6F5C' }}>
-                  Sin modificaciones registradas.
+                  Sin modificaciones registradas{filtroCC !== 'TODOS' ? ` en ${filtroCC}${filtroMes !== 'TODOS' ? ' para ' + MESES[filtroMes - 1] : ''}` : ''}.
                 </td></tr>
               )}
-              {visibleModifs.map((m) => (
+              {filteredModifs.map((m) => {
+                const clasifs = Array.isArray(m.clasificadores) && m.clasificadores.length > 0
+                  ? m.clasificadores
+                  : (m.clasificador ? [{ clasificador: m.clasificador, importe: m.importe }] : []);
+                return (
                 <tr key={m.id} className="border-b last:border-b-0 hover:bg-stone-50" style={{ borderColor: '#E5DDD0' }}>
                   <td className="px-4 py-3 text-xs" style={{ color: '#1E2A3A' }}>{m.fecha}</td>
                   <td className="px-4 py-3"><Pill>{m.centroCosto}</Pill></td>
                   <td className="px-4 py-3 font-mono text-xs" style={{ color: '#1E2A3A' }}>{m.codigoAOI}</td>
                   <td className="px-4 py-3 text-xs" style={{ color: '#1E2A3A' }}>{m.tipo}</td>
-                  <td className="px-4 py-3 text-xs" style={{ color: '#7A6F5C', maxWidth: 240 }}>
-                    <div className="truncate" title={m.clasificador}>{m.clasificador}</div>
+                  <td className="px-4 py-3 text-xs" style={{ color: '#7A6F5C', maxWidth: 280 }}>
+                    {clasifs.length === 1 ? (
+                      <div className="truncate" title={clasifs[0].clasificador}>{clasifs[0].clasificador}</div>
+                    ) : (
+                      <div>
+                        <div className="font-semibold mb-1" style={{ color: '#9C7A2B' }}>{clasifs.length} clasificadores:</div>
+                        {clasifs.map((c, idx) => (
+                          <div key={idx} className="truncate text-[11px]" title={c.clasificador}>
+                            • {c.clasificador}: <strong>{fmtMoneyShort(c.importe)}</strong>
+                          </div>
+                        ))}
+                      </div>
+                    )}
                   </td>
                   <td className="px-4 py-3 text-right font-medium" style={{ color: '#1E2A3A' }}>{fmtMoney(m.importe)}</td>
                   <td className="px-4 py-3 text-right whitespace-nowrap">
@@ -2879,7 +3344,8 @@ function Modificaciones({ activities, modifs, saveModifs, currentUser }) {
                     )}
                   </td>
                 </tr>
-              ))}
+                );
+              })}
             </tbody>
           </table>
         </div>
@@ -2895,12 +3361,68 @@ function Modificaciones({ activities, modifs, saveModifs, currentUser }) {
 
 function ModifForm({ modif, setModif, activities, tipos, onSave, onClose }) {
   function update(f, v) { setModif({ ...modif, [f]: v }); }
-  const ccActs = activities.filter(a => a.centroCosto === modif.centroCosto);
+
+  // Áreas disponibles en el CC seleccionado (basadas en las actividades)
+  const areasDisponibles = useMemo(() => {
+    const predefinidas = (typeof AREAS_POR_CC !== 'undefined' && AREAS_POR_CC[modif.centroCosto]) || [];
+    const enUso = Array.from(new Set(
+      activities.filter(a => a.centroCosto === modif.centroCosto && a.area).map(a => a.area)
+    ));
+    return Array.from(new Set([...predefinidas, ...enUso])).sort();
+  }, [modif.centroCosto, activities]);
+
+  // AOIs filtrados por CC y Área (si hay área seleccionada)
+  const ccActs = useMemo(() => {
+    let r = activities.filter(a => a.centroCosto === modif.centroCosto);
+    if (modif.area && modif.area !== 'TODAS') {
+      r = r.filter(a => a.area === modif.area);
+    }
+    return r;
+  }, [activities, modif.centroCosto, modif.area]);
+
+  // Si cambia el CC, resetear área a TODAS y limpiar AOI
+  function cambiarCC(nuevoCC) {
+    setModif({ ...modif, centroCosto: nuevoCC, area: 'TODAS', codigoAOI: '' });
+  }
+
+  // Si cambia el área, limpiar AOI si ya no aplica
+  function cambiarArea(nuevaArea) {
+    const aoisFiltrados = activities.filter(a => a.centroCosto === modif.centroCosto && (nuevaArea === 'TODAS' || a.area === nuevaArea));
+    const aoiSigueValido = aoisFiltrados.some(a => a.codigoAOI === modif.codigoAOI);
+    setModif({ ...modif, area: nuevaArea, codigoAOI: aoiSigueValido ? modif.codigoAOI : '' });
+  }
+
+  // Asegurar que siempre exista el array de clasificadores
+  const clasificadores = Array.isArray(modif.clasificadores) && modif.clasificadores.length > 0
+    ? modif.clasificadores
+    : [{ id: uid(), clasificador: '', importe: 0 }];
+
+  function actualizarClasif(idx, field, value) {
+    const next = [...clasificadores];
+    next[idx] = { ...next[idx], [field]: field === 'importe' ? (Number(value) || 0) : value };
+    setModif({ ...modif, clasificadores: next });
+  }
+
+  function agregarClasif() {
+    const next = [...clasificadores, { id: uid(), clasificador: '', importe: 0 }];
+    setModif({ ...modif, clasificadores: next });
+  }
+
+  function eliminarClasif(idx) {
+    if (clasificadores.length === 1) {
+      alert('Debe haber al menos un clasificador. Si no aplica, deja el campo vacío.');
+      return;
+    }
+    const next = clasificadores.filter((_, i) => i !== idx);
+    setModif({ ...modif, clasificadores: next });
+  }
+
+  const totalImporte = clasificadores.reduce((s, c) => s + (Number(c.importe) || 0), 0);
 
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center p-4" style={{ background: 'rgba(30,42,58,0.6)' }}>
       <div className="rounded-lg max-w-3xl w-full max-h-[90vh] overflow-y-auto" style={{ background: '#FAF7F0' }}>
-        <div className="px-6 py-4 border-b flex items-center justify-between" style={{ borderColor: '#E5DDD0' }}>
+        <div className="px-6 py-4 border-b flex items-center justify-between sticky top-0 z-10" style={{ background: '#FAF7F0', borderColor: '#E5DDD0' }}>
           <div style={{ fontFamily: "'Fraunces', serif", fontSize: 22, fontWeight: 500, color: '#1E2A3A' }}>
             Modificación presupuestal
           </div>
@@ -2912,8 +3434,14 @@ function ModifForm({ modif, setModif, activities, tipos, onSave, onClose }) {
             <input type="date" value={modif.fecha} onChange={(e) => update('fecha', e.target.value)} className={inputCls} />
           </Field>
           <Field label="Centro de Costo">
-            <select value={modif.centroCosto} onChange={(e) => update('centroCosto', e.target.value)} className={inputCls}>
+            <select value={modif.centroCosto} onChange={(e) => cambiarCC(e.target.value)} className={inputCls}>
               {CENTROS_COSTO.map(cc => <option key={cc.codigo} value={cc.nombre}>{cc.nombre}</option>)}
+            </select>
+          </Field>
+          <Field label="Área / Unidad">
+            <select value={modif.area || 'TODAS'} onChange={(e) => cambiarArea(e.target.value)} className={inputCls}>
+              <option value="TODAS">— Todas las áreas —</option>
+              {areasDisponibles.map(a => <option key={a} value={a}>{a}</option>)}
             </select>
           </Field>
           <Field label="Mes">
@@ -2932,15 +3460,55 @@ function ModifForm({ modif, setModif, activities, tipos, onSave, onClose }) {
               {tipos.map(t => <option key={t} value={t}>{t}</option>)}
             </select>
           </Field>
-          <Field label="Clasificador de gasto" full>
-            <input type="text" value={modif.clasificador} onChange={(e) => update('clasificador', e.target.value)} placeholder="2.3.1.3.1.1 COMBUSTIBLES Y CARBURANTES" className={inputCls} />
-          </Field>
-          <Field label="Importe (S/)">
-            <input type="number" step="0.01" value={modif.importe} onChange={(e) => update('importe', Number(e.target.value) || 0)} className={inputCls} />
-          </Field>
-          <Field label="Documento aprobación">
-            <input type="text" value={modif.documento} onChange={(e) => update('documento', e.target.value)} className={inputCls} />
-          </Field>
+        </div>
+
+        {/* Bloque de clasificadores múltiples */}
+        <div className="px-6 pb-2">
+          <div className="flex items-center justify-between mb-2">
+            <label className="text-xs font-semibold uppercase tracking-widest" style={{ color: '#7A6F5C' }}>
+              Clasificadores de gasto
+            </label>
+            <button type="button" onClick={agregarClasif}
+              className="flex items-center gap-1 px-3 py-1.5 rounded-md text-xs font-semibold"
+              style={{ background: '#C9A350', color: '#1E2A3A' }}>
+              <Plus size={12} /> Agregar clasificador
+            </button>
+          </div>
+
+          <div className="space-y-2">
+            {clasificadores.map((c, idx) => (
+              <div key={c.id || idx} className="flex gap-2 items-start p-2 rounded" style={{ background: '#FAF7F0', border: '1px solid #E5DDD0' }}>
+                <div className="flex-1">
+                  <input type="text"
+                    value={c.clasificador}
+                    onChange={(e) => actualizarClasif(idx, 'clasificador', e.target.value)}
+                    placeholder="2.3.1.3.1.1 COMBUSTIBLES Y CARBURANTES"
+                    className={inputCls} />
+                </div>
+                <div style={{ width: 160 }}>
+                  <input type="number" step="0.01"
+                    value={c.importe}
+                    onChange={(e) => actualizarClasif(idx, 'importe', e.target.value)}
+                    placeholder="Importe S/"
+                    className={inputCls} />
+                </div>
+                <button type="button" onClick={() => eliminarClasif(idx)}
+                  className="p-2 rounded hover:bg-red-50"
+                  title="Eliminar clasificador"
+                  style={{ color: '#B33B3B' }}>
+                  <Trash2 size={14} />
+                </button>
+              </div>
+            ))}
+          </div>
+
+          <div className="flex items-center justify-end mt-3 p-2 rounded" style={{ background: '#1E2A3A' }}>
+            <span className="text-xs uppercase tracking-wider mr-3" style={{ color: '#C9A350' }}>Importe total:</span>
+            <strong style={{ color: '#F5F1E8', fontSize: 16 }}>{fmtMoney(totalImporte)}</strong>
+          </div>
+        </div>
+
+        <div className="px-6 pt-2 pb-6">
           <Field label="Concepto / sustento" full>
             <textarea rows={3} value={modif.concepto} onChange={(e) => update('concepto', e.target.value)} className={inputCls} />
           </Field>
@@ -2981,13 +3549,21 @@ function Reporte({ activities, progress, modifs, currentUser }) {
           📋 Reporte Ejecutivo Mensual
         </button>
         <button onClick={() => setTab('tecnico')}
-          className="px-4 py-2.5 text-sm font-semibold transition-colors"
+          className="px-4 py-2.5 text-sm font-semibold transition-colors inline-flex items-center gap-2"
           style={{
             color: tab === 'tecnico' ? '#1E2A3A' : '#7A6F5C',
             borderBottom: tab === 'tecnico' ? '3px solid #C9A350' : '3px solid transparent',
             marginBottom: -1,
           }}>
           📄 Informe Técnico Oficial
+          <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-bold"
+            style={{
+              background: 'linear-gradient(135deg, #C9A350 0%, #E5C66D 100%)',
+              color: '#1E2A3A',
+              boxShadow: '0 1px 3px rgba(201,163,80,0.4)',
+            }}>
+            ✨ IA
+          </span>
         </button>
       </div>
 
@@ -3009,27 +3585,43 @@ function Reporte({ activities, progress, modifs, currentUser }) {
 function ReporteEjecutivo({ activities, progress, modifs, currentUser }) {
   const ccDisponibles = ccsVisibles(currentUser);
   const ccsParaReporte = CENTROS_COSTO.filter(c => ccDisponibles.includes(c.nombre));
-  const [ccSel, setCcSel] = useState(ccsParaReporte[0]?.nombre || CENTROS_COSTO[0].nombre);
+  // 'TODOS' = todos los CC visibles en un solo reporte consolidado
+  const [ccSel, setCcSel] = useState(ccsParaReporte.length > 1 ? 'TODOS' : (ccsParaReporte[0]?.nombre || CENTROS_COSTO[0].nombre));
   const [year, setYear] = useState(2026);
   const [mesFin, setMesFin] = useState(3);
 
-  const cc = CENTROS_COSTO.find(c => c.nombre === ccSel);
-  const acts = activities.filter(a => a.centroCosto === ccSel);
+  const esTodos = ccSel === 'TODOS';
   const mesesIncluir = Array.from({ length: mesFin }, (_, i) => i + 1);
 
-  const reporteData = acts.map(a => {
-    const registros = progress.filter(p => p.actividadId === a.id && p.anio === year && mesesIncluir.includes(p.mes))
-      .sort((x, y) => x.mes - y.mes);
-    return { actividad: a, registros };
+  // CCs a incluir en este reporte
+  const ccsIncluidos = esTodos ? ccsParaReporte : ccsParaReporte.filter(c => c.nombre === ccSel);
+
+  // Para cada CC incluido, recopilar datos
+  const datosPorCC = ccsIncluidos.map(cc => {
+    const actsCC = activities.filter(a => a.centroCosto === cc.nombre);
+    const reporteData = actsCC.map(a => {
+      const registros = progress.filter(p => p.actividadId === a.id && p.anio === year && mesesIncluir.includes(p.mes))
+        .sort((x, y) => x.mes - y.mes);
+      return { actividad: a, registros };
+    });
+    const modsCC = modifs.filter(m => m.centroCosto === cc.nombre && m.anio === year && mesesIncluir.includes(m.mes))
+      .sort((a, b) => a.mes - b.mes);
+    const totalMods = modifs.filter(m => m.centroCosto === cc.nombre && m.anio === year)
+      .reduce((s, m) => s + (Number(m.importe) || 0), 0);
+    const pim = cc.pia + totalMods;
+    const variacion = cc.pia > 0 ? ((pim - cc.pia) / cc.pia) * 100 : 0;
+    return { cc, actsCC, reporteData, modsCC, totalMods, pim, variacion };
   });
 
-  const modsCC = modifs.filter(m => m.centroCosto === ccSel && m.anio === year && mesesIncluir.includes(m.mes))
-    .sort((a, b) => a.mes - b.mes);
-
-  const totalMods = modifs.filter(m => m.centroCosto === ccSel && m.anio === year)
-    .reduce((s, m) => s + (Number(m.importe) || 0), 0);
-  const pim = cc.pia + totalMods;
-  const variacion = cc.pia > 0 ? ((pim - cc.pia) / cc.pia) * 100 : 0;
+  // Para vista de un solo CC (compatibilidad con bloques que esperaban variables sueltas)
+  const cc = ccsIncluidos[0]?.cc || CENTROS_COSTO[0];
+  const primerDato = datosPorCC[0] || { cc, actsCC: [], reporteData: [], modsCC: [], totalMods: 0, pim: cc.pia, variacion: 0 };
+  const acts = primerDato.actsCC;
+  const reporteData = primerDato.reporteData;
+  const modsCC = primerDato.modsCC;
+  const totalMods = primerDato.totalMods;
+  const pim = primerDato.pim;
+  const variacion = primerDato.variacion;
 
   async function exportarWord() {
     const html = construirHTML();
@@ -3037,7 +3629,8 @@ function ReporteEjecutivo({ activities, progress, modifs, currentUser }) {
     const url = URL.createObjectURL(blob);
     const link = document.createElement('a');
     link.href = url;
-    link.download = `Reporte_Ejecutivo_${ccSel.replace(/\s+/g, '_')}_${year}_al_${MESES[mesFin - 1]}.doc`;
+    const nombreArchivo = esTodos ? 'TODOS_CC' : ccSel.replace(/\s+/g, '_');
+    link.download = `Reporte_Ejecutivo_${nombreArchivo}_${year}_al_${MESES[mesFin - 1]}.doc`;
     document.body.appendChild(link);
     link.click();
     document.body.removeChild(link);
@@ -3066,6 +3659,99 @@ function ReporteEjecutivo({ activities, progress, modifs, currentUser }) {
     html += `<h1>Resumen Ejecutivo de Seguimiento mensual del POI</h1>`;
     html += `<p class="center">PROGRAMA NUESTRAS CIUDADES — ${year}</p>`;
     html += `<p class="center">Periodo: Enero — ${MESES[mesFin - 1]} ${year}</p>`;
+
+    if (esTodos) {
+      // ========== Reporte CONSOLIDADO de todos los CC ==========
+      html += `<p class="center"><strong>REPORTE CONSOLIDADO — ${datosPorCC.length} Centros de Costo</strong></p>`;
+
+      // Resumen general agregado
+      const totPIA = datosPorCC.reduce((s, d) => s + d.cc.pia, 0);
+      const totPIM = datosPorCC.reduce((s, d) => s + d.pim, 0);
+      const totMods = datosPorCC.reduce((s, d) => s + d.totalMods, 0);
+      const totActs = datosPorCC.reduce((s, d) => s + d.actsCC.length, 0);
+      const variacionTot = totPIA > 0 ? ((totPIM - totPIA) / totPIA) * 100 : 0;
+
+      html += `<h2>I. RESUMEN EJECUTIVO CONSOLIDADO</h2>`;
+      html += `<p>El presente reporte consolida la información de seguimiento del Plan Operativo Institucional (${year}) correspondiente a ${datosPorCC.length} Centros de Costo del Programa Nuestras Ciudades, abarcando el periodo de enero a ${MESES[mesFin - 1].toLowerCase()} de ${year}.</p>`;
+      html += `<div class="info-box">`;
+      html += `<strong>PIA total:</strong> ${fmtMoney(totPIA)} &nbsp;|&nbsp; `;
+      html += `<strong>PIM total:</strong> ${fmtMoney(totPIM)} &nbsp;|&nbsp; `;
+      html += `<strong>Modificaciones:</strong> ${fmtMoney(totMods)} &nbsp;|&nbsp; `;
+      html += `<strong>Variación:</strong> ${variacionTot >= 0 ? '+' : ''}${variacionTot.toFixed(2)}% &nbsp;|&nbsp; `;
+      html += `<strong>Total actividades:</strong> ${totActs} &nbsp;|&nbsp; `;
+      html += `<strong>Centros de Costo:</strong> ${datosPorCC.length}</div>`;
+
+      // Iterar por cada CC
+      datosPorCC.forEach((d, idx) => {
+        html += `<div style="page-break-before: ${idx > 0 ? 'always' : 'auto'}"></div>`;
+        html += `<h1>Centro de Costo ${idx + 1}: ${d.cc.codigo} — ${d.cc.nombre}</h1>`;
+
+        html += `<h2>${idx + 2}.1 RESUMEN</h2>`;
+        html += `<p>${d.cc.resumen || ''}</p>`;
+        html += `<div class="info-box">`;
+        html += `<strong>PIA:</strong> ${fmtMoney(d.cc.pia)} &nbsp;|&nbsp; `;
+        html += `<strong>PIM:</strong> ${fmtMoney(d.pim)} &nbsp;|&nbsp; `;
+        html += `<strong>Variación:</strong> ${d.variacion >= 0 ? '+' : ''}${d.variacion.toFixed(2)}% &nbsp;|&nbsp; `;
+        html += `<strong>Actividades:</strong> ${d.actsCC.length}</div>`;
+
+        html += `<h2>${idx + 2}.2 Principales logros</h2>`;
+        d.reporteData.forEach(({ actividad, registros }) => {
+          html += `<h3>${actividad.codigoAOI}: ${actividad.nombre}</h3>`;
+          mesesIncluir.forEach(m => {
+            const r = registros.find(x => x.mes === m);
+            html += `<p><span class="mes-label">${MESES[m - 1]}:</span> ${r?.logros || '<span class="sin-reg">Sin registro para el periodo.</span>'}</p>`;
+          });
+        });
+
+        html += `<h2>${idx + 2}.3 Limitaciones</h2>`;
+        d.reporteData.forEach(({ actividad, registros }) => {
+          html += `<h3>${actividad.codigoAOI}: ${actividad.nombre}</h3>`;
+          mesesIncluir.forEach(m => {
+            const r = registros.find(x => x.mes === m);
+            html += `<p><span class="mes-label">${MESES[m - 1]}:</span> ${r?.limitaciones || '<span class="sin-reg">Sin registro para el periodo.</span>'}</p>`;
+          });
+        });
+
+        html += `<h2>${idx + 2}.4 Medidas adoptadas</h2>`;
+        d.reporteData.forEach(({ actividad, registros }) => {
+          html += `<h3>${actividad.codigoAOI}: ${actividad.nombre}</h3>`;
+          mesesIncluir.forEach(m => {
+            const r = registros.find(x => x.mes === m);
+            html += `<p><span class="mes-label">${MESES[m - 1]}:</span> ${r?.medidas || '<span class="sin-reg">Sin registro para el periodo.</span>'}</p>`;
+          });
+        });
+
+        html += `<h2>${idx + 2}.5 Modificaciones presupuestales</h2>`;
+        mesesIncluir.forEach(m => {
+          const monthMods = d.modsCC.filter(x => x.mes === m);
+          if (monthMods.length === 0) return;
+          html += `<h3>${MESES[m - 1]}</h3>`;
+          const byTipo = {};
+          monthMods.forEach(mm => {
+            const tipo = mm.tipo || 'Sin tipo';
+            if (!byTipo[tipo]) byTipo[tipo] = [];
+            byTipo[tipo].push(mm);
+          });
+          Object.entries(byTipo).forEach(([tipo, lista]) => {
+            html += `<p><strong>${tipo}:</strong></p>`;
+            html += `<table><tr><th>AOI</th><th>Importe</th><th>Concepto</th></tr>`;
+            let sumTipo = 0;
+            lista.forEach(mm => {
+              const imp = Number(mm.importe) || 0;
+              sumTipo += imp;
+              html += `<tr><td>${mm.codigoAOI || '-'}</td><td style="text-align:right">${fmtMoney(imp)}</td><td>${mm.concepto || '-'}</td></tr>`;
+            });
+            html += `<tr><td colspan="1"><strong>Total</strong></td><td style="text-align:right"><strong>${fmtMoney(sumTipo)}</strong></td><td></td></tr>`;
+            html += `</table>`;
+          });
+        });
+      });
+
+      html += `</body></html>`;
+      return html;
+    }
+
+    // ========== Reporte de UN SOLO CC (original) ==========
     html += `<p class="center"><strong>CENTRO DE COSTOS ${cc.codigo} - ${cc.nombre}</strong></p>`;
 
     // I. Resumen
@@ -3161,6 +3847,9 @@ function ReporteEjecutivo({ activities, progress, modifs, currentUser }) {
         <div className="grid grid-cols-3 gap-4">
           <Field label="Centro de costo">
             <select value={ccSel} onChange={(e) => setCcSel(e.target.value)} className={inputCls}>
+              {ccsParaReporte.length > 1 && (
+                <option value="TODOS">📋 TODOS los Centros de Costo (consolidado)</option>
+              )}
               {ccsParaReporte.map(c => <option key={c.codigo} value={c.nombre}>{c.codigo} — {c.nombre}</option>)}
             </select>
           </Field>
@@ -3184,9 +3873,99 @@ function ReporteEjecutivo({ activities, progress, modifs, currentUser }) {
           </div>
           <div className="text-sm mt-2" style={{ color: '#7A6F5C' }}>PROGRAMA NUESTRAS CIUDADES — {year}</div>
           <div className="text-sm" style={{ color: '#7A6F5C' }}>Periodo: Enero — {MESES[mesFin - 1]} {year}</div>
-          <div className="text-sm mt-2 font-semibold" style={{ color: '#1E2A3A' }}>CENTRO DE COSTOS {cc.codigo} - {cc.nombre}</div>
+          {esTodos ? (
+            <div className="text-sm mt-2 font-semibold" style={{ color: '#1E2A3A' }}>
+              REPORTE CONSOLIDADO DE TODOS LOS CENTROS DE COSTO ({datosPorCC.length})
+            </div>
+          ) : (
+            <div className="text-sm mt-2 font-semibold" style={{ color: '#1E2A3A' }}>
+              CENTRO DE COSTOS {cc.codigo} - {cc.nombre}
+            </div>
+          )}
         </div>
 
+        {esTodos ? (
+          // ============ Vista CONSOLIDADA: todos los CC ============
+          <>
+            {/* Resumen general agregado */}
+            <ReportSection num="I" title="RESUMEN EJECUTIVO CONSOLIDADO">
+              <p className="text-sm leading-relaxed text-justify mb-3" style={{ color: '#1E2A3A' }}>
+                El presente reporte consolida la información de seguimiento del Plan Operativo Institucional ({year}) correspondiente a {datosPorCC.length} Centros de Costo del Programa Nuestras Ciudades, abarcando el periodo de enero a {MESES[mesFin - 1].toLowerCase()} de {year}.
+              </p>
+              {(() => {
+                const totPIA = datosPorCC.reduce((s, d) => s + d.cc.pia, 0);
+                const totPIM = datosPorCC.reduce((s, d) => s + d.pim, 0);
+                const totMods = datosPorCC.reduce((s, d) => s + d.totalMods, 0);
+                const totActs = datosPorCC.reduce((s, d) => s + d.actsCC.length, 0);
+                const variacionTot = totPIA > 0 ? ((totPIM - totPIA) / totPIA) * 100 : 0;
+                return (
+                  <div className="grid grid-cols-2 gap-2 p-4 rounded" style={{ background: '#FAF7F0', borderLeft: '4px solid #C9A350' }}>
+                    <div className="text-xs"><span style={{ color: '#7A6F5C' }}>PIA total:</span> <strong style={{ color: '#1E2A3A' }}>{fmtMoney(totPIA)}</strong></div>
+                    <div className="text-xs"><span style={{ color: '#7A6F5C' }}>PIM total:</span> <strong style={{ color: '#1E2A3A' }}>{fmtMoney(totPIM)}</strong></div>
+                    <div className="text-xs"><span style={{ color: '#7A6F5C' }}>Modificaciones:</span> <strong style={{ color: '#1E2A3A' }}>{fmtMoney(totMods)}</strong></div>
+                    <div className="text-xs"><span style={{ color: '#7A6F5C' }}>Variación:</span> <strong style={{ color: variacionTot > 0 ? '#2D7A4E' : '#1E2A3A' }}>{variacionTot >= 0 ? '+' : ''}{variacionTot.toFixed(2)}%</strong></div>
+                    <div className="text-xs"><span style={{ color: '#7A6F5C' }}>Total actividades:</span> <strong style={{ color: '#1E2A3A' }}>{totActs}</strong></div>
+                    <div className="text-xs"><span style={{ color: '#7A6F5C' }}>Centros de Costo:</span> <strong style={{ color: '#1E2A3A' }}>{datosPorCC.length}</strong></div>
+                  </div>
+                );
+              })()}
+            </ReportSection>
+
+            {/* Iterar por cada CC */}
+            {datosPorCC.map((d, idx) => (
+              <div key={d.cc.codigo} className="mt-8 pt-6" style={{ borderTop: idx > 0 ? '2px dashed #C9A350' : 'none' }}>
+                <div className="mb-4 p-3 rounded" style={{ background: '#1E2A3A' }}>
+                  <div className="text-sm font-bold" style={{ color: '#C9A350' }}>
+                    Centro de Costo {idx + 1}: {d.cc.codigo} — {d.cc.nombre}
+                  </div>
+                </div>
+
+                <ReportSection num={`${idx + 2}.1`} title={`RESUMEN — ${d.cc.nombre}`}>
+                  <p className="text-sm leading-relaxed text-justify" style={{ color: '#1E2A3A' }}>{d.cc.resumen}</p>
+                  <div className="mt-4 grid grid-cols-2 gap-2 p-4 rounded" style={{ background: '#FAF7F0', borderLeft: '4px solid #C9A350' }}>
+                    <div className="text-xs"><span style={{ color: '#7A6F5C' }}>PIA:</span> <strong style={{ color: '#1E2A3A' }}>{fmtMoney(d.cc.pia)}</strong></div>
+                    <div className="text-xs"><span style={{ color: '#7A6F5C' }}>PIM al cierre:</span> <strong style={{ color: '#1E2A3A' }}>{fmtMoney(d.pim)}</strong></div>
+                    <div className="text-xs"><span style={{ color: '#7A6F5C' }}>Variación:</span> <strong style={{ color: d.variacion > 0 ? '#2D7A4E' : '#1E2A3A' }}>{d.variacion >= 0 ? '+' : ''}{d.variacion.toFixed(2)}%</strong></div>
+                    <div className="text-xs"><span style={{ color: '#7A6F5C' }}>Actividades:</span> <strong style={{ color: '#1E2A3A' }}>{d.actsCC.length}</strong></div>
+                  </div>
+                </ReportSection>
+
+                <ReportSection num={`${idx + 2}.2`} title="Principales logros">
+                  {d.reporteData.map(({ actividad, registros }) => (
+                    <ActividadBloque key={actividad.id} actividad={actividad} registros={registros} campo="logros" mesesIncluir={mesesIncluir} />
+                  ))}
+                </ReportSection>
+
+                <ReportSection num={`${idx + 2}.3`} title="Limitaciones">
+                  {d.reporteData.map(({ actividad, registros }) => (
+                    <ActividadBloque key={actividad.id} actividad={actividad} registros={registros} campo="limitaciones" mesesIncluir={mesesIncluir} />
+                  ))}
+                </ReportSection>
+
+                <ReportSection num={`${idx + 2}.4`} title="Medidas adoptadas">
+                  {d.reporteData.map(({ actividad, registros }) => (
+                    <ActividadBloque key={actividad.id} actividad={actividad} registros={registros} campo="medidas" mesesIncluir={mesesIncluir} />
+                  ))}
+                </ReportSection>
+
+                <ReportSection num={`${idx + 2}.5`} title="Modificaciones presupuestales">
+                  {mesesIncluir.map(m => {
+                    const monthMods = d.modsCC.filter(x => x.mes === m);
+                    if (monthMods.length === 0) return null;
+                    return (
+                      <div key={m} className="mb-4">
+                        <div className="text-sm font-semibold mb-2" style={{ color: '#9C7A2B' }}>{MESES[m - 1]}</div>
+                        <ModifTablaPorAOI mods={monthMods} acts={d.actsCC} />
+                      </div>
+                    );
+                  })}
+                </ReportSection>
+              </div>
+            ))}
+          </>
+        ) : (
+          // ============ Vista de UN solo CC ============
+          <>
         <ReportSection num="I" title="RESUMEN EJECUTIVO">
           <p className="text-sm leading-relaxed text-justify" style={{ color: '#1E2A3A' }}>{cc.resumen}</p>
           <div className="mt-4 grid grid-cols-2 gap-2 p-4 rounded" style={{ background: '#FAF7F0', borderLeft: '4px solid #C9A350' }}>
@@ -3240,6 +4019,8 @@ function ReporteEjecutivo({ activities, progress, modifs, currentUser }) {
             );
           })}
         </ReportSection>
+          </>
+        )}
       </Card>
     </>
   );
@@ -3280,7 +4061,7 @@ function InformeTecnico({ activities, progress, modifs, currentUser }) {
   useEffect(() => {
     const periodoIntro = tipoInforme === 'mensual'
       ? `correspondiente al mes de ${MESES[mes - 1].toLowerCase()} de ${year}`
-      : `acumulado del año ${year}`;
+      : `acumulado al mes de ${MESES[mes - 1].toLowerCase()} de ${year}`;
     setIntro11(`En atención a los documentos de la referencia, se presenta el informe de seguimiento del Plan Operativo Institucional (POI) del Programa Nuestras Ciudades (PNC), ${periodoIntro}. El presente documento detalla el análisis del avance en la ejecución de las metas físicas y financieras, los logros alcanzados, las limitaciones identificadas y las medidas adoptadas.`);
   }, [year, mes, tipoInforme]);
 
@@ -3299,12 +4080,17 @@ function InformeTecnico({ activities, progress, modifs, currentUser }) {
     let modsCC = modifs.filter(m => m.centroCosto === ccNombre && m.anio === year);
 
     if (tipoInforme === 'mensual') {
+      // Solo el mes seleccionado
       segsCC = segsCC.filter(s => s.mes === mes);
       modsCC = modsCC.filter(m => m.mes === mes);
+    } else {
+      // Acumulado: desde enero hasta el mes seleccionado (inclusive)
+      segsCC = segsCC.filter(s => s.mes <= mes);
+      modsCC = modsCC.filter(m => m.mes <= mes);
     }
 
     const pia = ccObj ? ccObj.pia : 0;
-    const totalMods = modifs.filter(m => m.centroCosto === ccNombre && m.anio === year)
+    const totalMods = modifs.filter(m => m.centroCosto === ccNombre && m.anio === year && m.mes <= mes)
       .reduce((s, m) => s + (Number(m.importe) || 0), 0);
     const pim = pia + totalMods;
     const ejecFin = segsCC.reduce((s, p) => s + (Number(p.avanceFinanciero) || 0), 0);
@@ -3313,10 +4099,15 @@ function InformeTecnico({ activities, progress, modifs, currentUser }) {
     // Meta física programada
     let metaFisProg = 0;
     if (tipoInforme === 'mensual') {
+      // Solo el mes seleccionado
       const campoMes = `fis_${MESES_ABR[mes - 1].toLowerCase()}`;
       metaFisProg = actsCC.reduce((s, a) => s + (Number(a[campoMes]) || 0), 0);
     } else {
-      metaFisProg = actsCC.reduce((s, a) => s + (Number(a.metaAnualFisica) || 0), 0);
+      // Acumulado: suma de enero hasta el mes seleccionado
+      for (let m = 1; m <= mes; m++) {
+        const campoMes = `fis_${MESES_ABR[m - 1].toLowerCase()}`;
+        metaFisProg += actsCC.reduce((s, a) => s + (Number(a[campoMes]) || 0), 0);
+      }
     }
 
     const pctFin = pim > 0 ? (ejecFin / pim) * 100 : 0;
@@ -3347,14 +4138,15 @@ function InformeTecnico({ activities, progress, modifs, currentUser }) {
   const pctFisList = indicadoresPorCC.map(i => i.pctFis);
   totales.pctFis = pctFisList.length > 0 ? pctFisList.reduce((a, b) => a + b, 0) / pctFisList.length : 0;
 
-  // Evolución mensual (solo para acumulado) - incluye programado y ejecutado, físico y financiero
+  // Evolución mensual (solo para acumulado) - hasta el mes seleccionado
   const evolucionMensual = [];
   if (tipoInforme === 'acumulado') {
     // Pre-calcular actividades filtradas por permisos del usuario
     const actsFiltradas = esResponsableCC(currentUser) ? filtrarActividadesUsuario(activities, currentUser) : activities;
     const idsFiltradas = new Set(actsFiltradas.map(a => a.id));
 
-    for (let m = 1; m <= 12; m++) {
+    // Acumulado va de enero hasta el mes seleccionado (mes)
+    for (let m = 1; m <= mes; m++) {
       const mAbr = MESES_ABR[m - 1].toLowerCase();
       const segMes = progress.filter(p => p.anio === year && p.mes === m && idsFiltradas.has(p.actividadId));
 
@@ -3380,41 +4172,97 @@ function InformeTecnico({ activities, progress, modifs, currentUser }) {
   }
 
   // Recolección de logros y limitaciones
-  function recolectarLogros(seguimientos, actsData) {
-    const logros = [];
-    seguimientos.forEach(s => {
-      if (s.logros && String(s.logros).trim()) {
-        const act = actsData.find(a => a.id === s.actividadId);
-        if (act) {
-          logros.push({
-            codigoAOI: act.codigoAOI, nombre: act.nombre,
-            texto: s.logros.trim(), mes: s.mes,
-          });
-        }
+  /**
+   * Construye un resumen consolidado del análisis del CC.
+   * Describe la ejecución general SIN entrar en detalle por actividad/mes.
+   * Solo cuenta actividades con avance físico > 0.
+   */
+  function construirResumenCC(ind, periodoTexto) {
+    // Actividades con avance físico
+    const actsConAvance = new Set();
+    let avanceFisicoTotal = 0;
+    ind.seguimientos.forEach(s => {
+      const avf = Number(s.avanceFisico) || 0;
+      if (avf > 0) {
+        actsConAvance.add(s.actividadId);
+        avanceFisicoTotal += avf;
       }
     });
-    return logros;
+
+    const totalActs = ind.actividades;
+    const conAvance = actsConAvance.size;
+
+    let resumen = `${periodoTexto} se tiene una ejecución financiera de S/ ${ind.ejecFin.toLocaleString('es-PE', { minimumFractionDigits: 2 })} `;
+    resumen += `que representa el ${ind.pctFin.toFixed(2)}% del PIM. `;
+    resumen += `Se registró un avance físico promedio de ${ind.pctFis.toFixed(2)}%. `;
+
+    if (conAvance === 0) {
+      resumen += `No se registraron avances físicos en las actividades durante el período evaluado.`;
+    } else if (conAvance === totalActs) {
+      resumen += `Se registraron avances en las ${totalActs} actividades del centro de costo.`;
+    } else {
+      resumen += `De las ${totalActs} actividades del centro de costo, ${conAvance} presentaron avance físico durante el período.`;
+    }
+
+    return resumen;
   }
 
-  function recolectarLimitaciones(seguimientos, actsData) {
-    const lims = [];
+  // Compatibilidad: stub que devuelve vacío (limitaciones ya no se muestran)
+  function recolectarLimitaciones() { return []; }
+
+  /**
+   * Devuelve los logros más relevantes del centro de costo.
+   * Reglas:
+   * 1. Solo considera seguimientos donde la actividad tuvo avance físico > 0
+   * 2. Agrupa por actividad (no se repite la misma actividad por mes)
+   * 3. Ordena por avance físico acumulado (mayor impacto primero)
+   * 4. Devuelve máximo 5 logros más relevantes
+   */
+  function recolectarLogros(seguimientos, actsData) {
+    // Agrupar por actividad: cada actividad con su avance total y todos sus textos de logros
+    const porActividad = {};
     seguimientos.forEach(s => {
-      if (s.limitaciones && s.limitaciones.trim() &&
-          !s.limitaciones.toLowerCase().includes('no se reg') &&
-          !s.limitaciones.toLowerCase().includes('sin limit') &&
-          !s.limitaciones.toLowerCase().includes('no se presentaron')) {
-        const act = actsData.find(a => a.id === s.actividadId);
-        if (act) {
-          lims.push({
-            codigoAOI: act.codigoAOI, nombre: act.nombre,
-            texto: s.limitaciones.trim(),
-            medidas: (s.medidas || '').trim(),
-            mes: s.mes,
-          });
-        }
+      const avanceFis = Number(s.avanceFisico) || 0;
+      if (avanceFis <= 0) return; // ignorar seguimientos sin avance físico
+      const act = actsData.find(a => a.id === s.actividadId);
+      if (!act) return;
+      const textoLogro = String(s.logros || '').trim();
+      if (!textoLogro) return;
+
+      if (!porActividad[act.id]) {
+        porActividad[act.id] = {
+          codigoAOI: act.codigoAOI,
+          nombre: act.nombre,
+          area: act.area,
+          unidadMedida: act.unidadMedida,
+          avanceFisAcum: 0,
+          avanceFinAcum: 0,
+          textos: [],
+        };
       }
+      porActividad[act.id].avanceFisAcum += avanceFis;
+      porActividad[act.id].avanceFinAcum += Number(s.avanceFinanciero) || 0;
+      porActividad[act.id].textos.push({ mes: s.mes, texto: textoLogro });
     });
-    return lims;
+
+    // Ordenar por avance físico acumulado descendente y tomar los 5 más relevantes
+    const lista = Object.values(porActividad)
+      .sort((a, b) => b.avanceFisAcum - a.avanceFisAcum)
+      .slice(0, 5);
+
+    // Consolidar el texto de cada actividad (combinar de varios meses si existen)
+    return lista.map(item => ({
+      codigoAOI: item.codigoAOI,
+      nombre: item.nombre,
+      area: item.area,
+      unidadMedida: item.unidadMedida,
+      avanceFisAcum: item.avanceFisAcum,
+      avanceFinAcum: item.avanceFinAcum,
+      // Toma el texto más completo (más largo) si hay varios, evitando duplicaciones
+      texto: item.textos.length === 1
+        ? item.textos[0].texto
+        : item.textos.sort((x, y) => y.texto.length - x.texto.length)[0].texto,
+    }));
   }
 
   // ============ EXPORTACIÓN A WORD ============
@@ -3424,7 +4272,7 @@ function InformeTecnico({ activities, progress, modifs, currentUser }) {
     const url = URL.createObjectURL(blob);
     const link = document.createElement('a');
     link.href = url;
-    const sufijo = tipoInforme === 'mensual' ? `${MESES_ABR[mes - 1]}_${year}` : `Acumulado_${year}`;
+    const sufijo = tipoInforme === 'mensual' ? `${MESES_ABR[mes - 1]}_${year}` : `Acumulado_a_${MESES_ABR[mes - 1]}_${year}`;
     link.download = `Informe_Tecnico_POI_${sufijo}.doc`;
     link.click();
     URL.revokeObjectURL(url);
@@ -3441,7 +4289,7 @@ function InformeTecnico({ activities, progress, modifs, currentUser }) {
   function construirHTMLInforme() {
     const periodoTexto = tipoInforme === 'mensual'
       ? `al mes de ${MESES[mes - 1].toLowerCase()} ${year}`
-      : `acumulado al año ${year}`;
+      : `acumulado al mes de ${MESES[mes - 1].toLowerCase()} ${year}`;
 
     let html = `<!DOCTYPE html><html><head><meta charset="utf-8"><title>Informe Técnico POI</title>
 <style>
@@ -3492,7 +4340,7 @@ p { text-align: justify; margin: 6px 0; }
     html += `<h2>3.1. Resumen General del Programa</h2>`;
     const periodoAnal = tipoInforme === 'mensual'
       ? `Al cierre del mes de ${MESES[mes - 1].toLowerCase()} de ${year}`
-      : `Al período acumulado del año ${year}`;
+      : `Al período acumulado al mes de ${MESES[mes - 1].toLowerCase()} de ${year}`;
     html += `<p>${periodoAnal}, el Programa Nuestras Ciudades (PNC) tiene el Presupuesto Institucional Modificado (PIM) que asciende a <strong>${fmtMoney(totales.pim)}</strong> de los cuales se tiene un avance de ejecución financiera el importe de <strong>${fmtMoney(totales.ejecFin)}</strong>, que representa un avance de ejecución de <strong>${totales.pctFin.toFixed(2)}%</strong>. Por otro lado, se tiene una ejecución de meta física promedio de <strong>${totales.pctFis.toFixed(2)}%</strong> de las actividades operativas e inversiones.</p>`;
 
     // Tabla resumen
@@ -3526,8 +4374,14 @@ p { text-align: justify; margin: 6px 0; }
       const desc = descripcionesCC[ind.nombre] || '';
       html += `<h3>3.2.${idx + 1}. ${ind.nombre}</h3>`;
       if (desc) html += `<p>${desc}</p>`;
-      const periodoCC = tipoInforme === 'mensual' ? `En el mes de ${MESES[mes - 1].toLowerCase()}` : `En el período acumulado`;
-      html += `<p>${periodoCC} se tiene una ejecución financiera de <strong>${fmtMoney(ind.ejecFin)}</strong>. Se tiene una ejecución física promedio de <strong>${ind.pctFis.toFixed(2)}%</strong>.</p>`;
+
+      const periodoCC = tipoInforme === 'mensual'
+        ? `En el mes de ${MESES[mes - 1].toLowerCase()} de ${year}`
+        : `En el período acumulado al mes de ${MESES[mes - 1].toLowerCase()} de ${year}`;
+
+      // Resumen consolidado del CC (no detalla actividad por mes)
+      const resumenTexto = construirResumenCC(ind, periodoCC);
+      html += `<p><strong>Resumen de resultados:</strong> ${resumenTexto}</p>`;
 
       // Tabla del CC
       html += `<table><tr><th>Indicador</th><th>Valor</th></tr>`;
@@ -3542,24 +4396,12 @@ p { text-align: justify; margin: 6px 0; }
       html += `<tr><td>N° actividades</td><td>${ind.actividades}</td></tr>`;
       html += `</table>`;
 
-      // Logros
+      // Logros: solo los 3-5 más relevantes (ya filtrados sin avance == 0)
       const logros = recolectarLogros(ind.seguimientos, ind.actividadesData);
       if (logros.length > 0) {
-        html += `<p><strong>Principales Logros:</strong></p><ul>`;
+        html += `<p><strong>Principales logros:</strong></p><ul>`;
         logros.forEach(l => {
-          html += `<li><strong>${l.codigoAOI}</strong>: ${l.texto}</li>`;
-        });
-        html += `</ul>`;
-      }
-
-      // Limitaciones
-      const lims = recolectarLimitaciones(ind.seguimientos, ind.actividadesData);
-      if (lims.length > 0) {
-        html += `<p><strong>Limitaciones identificadas:</strong></p><ul>`;
-        lims.forEach(l => {
-          html += `<li><strong>${l.codigoAOI}</strong>: ${l.texto}`;
-          if (l.medidas) html += `<br><em>Medidas adoptadas:</em> ${l.medidas}`;
-          html += `</li>`;
+          html += `<li><strong>${l.codigoAOI}</strong> (${l.unidadMedida || ''}, avance acumulado: ${l.avanceFisAcum.toFixed(2)}): ${l.texto}</li>`;
         });
         html += `</ul>`;
       }
@@ -3570,7 +4412,7 @@ p { text-align: justify; margin: 6px 0; }
     html += `<h2>4.1 Conclusiones</h2>`;
     const periodoConcl = tipoInforme === 'mensual'
       ? `al culminar el mes de ${MESES[mes - 1].toLowerCase()} de ${year}`
-      : `al período acumulado del año ${year}`;
+      : `al período acumulado al mes de ${MESES[mes - 1].toLowerCase()} de ${year}`;
     html += `<p><strong>4.1.1</strong> El Programa Nuestras Ciudades, ${periodoConcl} ha alcanzado una ejecución presupuestal de <strong>${fmtMoney(totales.ejecFin)}</strong> que representa el <strong>${totales.pctFin.toFixed(2)}%</strong> del PIM. Asimismo, se tiene un avance de la ejecución física promedio de <strong>${totales.pctFis.toFixed(2)}%</strong> en referencia a la programación.</p>`;
     html += `<p><strong>4.1.2</strong> Se ha cumplido con el registro de la información de seguimiento en el aplicativo CEPLAN V.01, conforme a la normativa vigente.</p>`;
     html += `<p><strong>4.1.3</strong> La trazabilidad de las acciones queda registrada en la bitácora del Sistema de Seguimiento POI del PNC.</p>`;
@@ -3594,10 +4436,32 @@ p { text-align: justify; margin: 6px 0; }
 
   return (
     <>
-      <div className="flex justify-end mb-4">
+      <div className="flex items-center justify-between mb-4 p-4 rounded-lg"
+        style={{
+          background: 'linear-gradient(135deg, #FBF1D9 0%, #F5E5B8 100%)',
+          border: '1px solid #C9A350',
+        }}>
+        <div className="flex items-center gap-3">
+          <div className="flex items-center justify-center w-10 h-10 rounded-full"
+            style={{ background: 'linear-gradient(135deg, #C9A350 0%, #E5C66D 100%)' }}>
+            <span style={{ fontSize: 20 }}>✨</span>
+          </div>
+          <div>
+            <div className="text-sm font-bold flex items-center gap-2" style={{ color: '#1E2A3A' }}>
+              Informe Técnico generado con IA
+              <span className="px-2 py-0.5 rounded-full text-[10px] font-bold"
+                style={{ background: '#1E2A3A', color: '#C9A350' }}>
+                ✨ IA
+              </span>
+            </div>
+            <div className="text-xs" style={{ color: '#7A6F5C' }}>
+              El sistema usa inteligencia artificial para analizar los datos del seguimiento y redactar automáticamente el informe técnico oficial.
+            </div>
+          </div>
+        </div>
         <button onClick={exportarWord}
-          className="flex items-center gap-2 px-4 py-2.5 rounded-md text-sm font-semibold transition-colors"
-          style={{ background: '#C9A350', color: '#1E2A3A' }}>
+          className="flex items-center gap-2 px-4 py-2.5 rounded-md text-sm font-semibold transition-colors whitespace-nowrap"
+          style={{ background: '#1E2A3A', color: '#C9A350' }}>
           <Download size={16} /> Exportar a Word
         </button>
       </div>
@@ -3634,7 +4498,7 @@ p { text-align: justify; margin: 6px 0; }
               📊 Informe Acumulado
             </div>
             <div className="text-xs" style={{ color: '#7A6F5C' }}>
-              Análisis consolidado de todos los meses del año
+              Análisis acumulado desde enero hasta el mes seleccionado
             </div>
           </button>
         </div>
@@ -3647,14 +4511,17 @@ p { text-align: justify; margin: 6px 0; }
               {ANIOS_DISPONIBLES.map(y => <option key={y} value={y}>{y}</option>)}
             </select>
           </Field>
-          {tipoInforme === 'mensual' && (
-            <Field label="Mes">
-              <select value={mes} onChange={(e) => setMes(Number(e.target.value))} className={inputCls}>
-                {MESES.map((m, i) => <option key={i} value={i + 1}>{m}</option>)}
-              </select>
-            </Field>
-          )}
+          <Field label={tipoInforme === 'mensual' ? 'Mes' : 'Acumulado hasta el mes de'}>
+            <select value={mes} onChange={(e) => setMes(Number(e.target.value))} className={inputCls}>
+              {MESES.map((m, i) => <option key={i} value={i + 1}>{m}</option>)}
+            </select>
+          </Field>
         </div>
+        {tipoInforme === 'acumulado' && (
+          <div className="mt-2 text-xs italic" style={{ color: '#7A6F5C' }}>
+            El informe acumulado incluirá los meses de <strong>enero</strong> a <strong>{MESES[mes - 1].toLowerCase()}</strong> de {year}.
+          </div>
+        )}
       </Card>
 
       {/* PREVISUALIZACIÓN DEL INFORME */}
@@ -3713,7 +4580,7 @@ p { text-align: justify; margin: 6px 0; }
             </div>
             <div>
               <label className="text-[10px] font-semibold uppercase" style={{ color: '#7A6F5C' }}>Asunto (se genera automáticamente)</label>
-              <input type="text" readOnly value={`Seguimiento del Plan Operativo Institucional ${year} del pliego 037 – MVCS – ${tipoInforme === 'mensual' ? `al mes de ${MESES[mes - 1].toLowerCase()} ${year}` : `acumulado al año ${year}`}.`} className={inputCls} style={{ background: '#F0E9D9' }} />
+              <input type="text" readOnly value={`Seguimiento del Plan Operativo Institucional ${year} del pliego 037 – MVCS – ${tipoInforme === 'mensual' ? `al mes de ${MESES[mes - 1].toLowerCase()} ${year}` : `acumulado al mes de ${MESES[mes - 1].toLowerCase()} ${year}`}.`} className={inputCls} style={{ background: '#F0E9D9' }} />
             </div>
             <div>
               <label className="text-[10px] font-semibold uppercase" style={{ color: '#7A6F5C' }}>Referencia 1</label>
@@ -3732,7 +4599,7 @@ p { text-align: justify; margin: 6px 0; }
           <div className="text-sm leading-relaxed mb-4" style={{ color: '#1E2A3A' }}>
             <div className="mb-3"><strong>A:</strong> {dirigidoA}<br />
               <span className="ml-4">{dirigidoCargo}</span></div>
-            <div className="mb-3"><strong>ASUNTO:</strong> Seguimiento del Plan Operativo Institucional {year} del pliego 037 – MVCS – {tipoInforme === 'mensual' ? `al mes de ${MESES[mes - 1].toLowerCase()} ${year}` : `acumulado al año ${year}`}.</div>
+            <div className="mb-3"><strong>ASUNTO:</strong> Seguimiento del Plan Operativo Institucional {year} del pliego 037 – MVCS – {tipoInforme === 'mensual' ? `al mes de ${MESES[mes - 1].toLowerCase()} ${year}` : `acumulado al mes de ${MESES[mes - 1].toLowerCase()} ${year}`}.</div>
             <div className="mb-3"><strong>REFERENCIA:</strong><br />
               <span className="ml-4">- {referencia1}<br />
               - {referencia2}</span></div>
@@ -3741,7 +4608,7 @@ p { text-align: justify; margin: 6px 0; }
         )}
 
         <p className="text-sm text-justify mb-2" style={{ color: '#1E2A3A' }}>
-          Tengo el agrado de dirigirme a usted, en relación a los documentos de la referencia mediante los cuales se solicitó el seguimiento del Plan Operativo Institucional {tipoInforme === 'mensual' ? `al mes de ${MESES[mes - 1].toLowerCase()} ${year}` : `acumulado al año ${year}`}.
+          Tengo el agrado de dirigirme a usted, en relación a los documentos de la referencia mediante los cuales se solicitó el seguimiento del Plan Operativo Institucional {tipoInforme === 'mensual' ? `al mes de ${MESES[mes - 1].toLowerCase()} ${year}` : `acumulado al mes de ${MESES[mes - 1].toLowerCase()} ${year}`}.
         </p>
         <p className="text-sm text-justify mb-4" style={{ color: '#1E2A3A' }}>
           Sobre el particular debo manifestarle lo siguiente:
@@ -3803,7 +4670,7 @@ p { text-align: justify; margin: 6px 0; }
         <ReportSection num="III" title="ANÁLISIS">
           <h3 className="text-sm font-bold mt-3 mb-2" style={{ color: '#1E2A3A' }}>3.1. Resumen General del Programa</h3>
           <p className="text-sm text-justify mb-3" style={{ color: '#1E2A3A' }}>
-            {tipoInforme === 'mensual' ? `Al cierre del mes de ${MESES[mes - 1].toLowerCase()} de ${year}` : `Al período acumulado del año ${year}`}, el Programa Nuestras Ciudades (PNC) tiene el Presupuesto Institucional Modificado (PIM) que asciende a <strong>{fmtMoney(totales.pim)}</strong> de los cuales se tiene un avance de ejecución financiera el importe de <strong>{fmtMoney(totales.ejecFin)}</strong>, que representa un avance de ejecución de <strong>{totales.pctFin.toFixed(2)}%</strong>. Por otro lado, se tiene una ejecución de meta física promedio de <strong>{totales.pctFis.toFixed(2)}%</strong>.
+            {tipoInforme === 'mensual' ? `Al cierre del mes de ${MESES[mes - 1].toLowerCase()} de ${year}` : `Al período acumulado al mes de ${MESES[mes - 1].toLowerCase()} de ${year}`}, el Programa Nuestras Ciudades (PNC) tiene el Presupuesto Institucional Modificado (PIM) que asciende a <strong>{fmtMoney(totales.pim)}</strong> de los cuales se tiene un avance de ejecución financiera el importe de <strong>{fmtMoney(totales.ejecFin)}</strong>, que representa un avance de ejecución de <strong>{totales.pctFin.toFixed(2)}%</strong>. Por otro lado, se tiene una ejecución de meta física promedio de <strong>{totales.pctFis.toFixed(2)}%</strong>.
           </p>
 
           <div className="mb-4 grid grid-cols-3 gap-2 p-3 rounded" style={{ background: '#FAF7F0', borderLeft: '4px solid #C9A350' }}>
@@ -3867,7 +4734,7 @@ p { text-align: justify; margin: 6px 0; }
           {/* Acumulado: SOLO acumulado tiene barras superpuestas del Resumen General */}
           {tipoInforme === 'acumulado' && (
             <div className="p-4 rounded mb-4" style={{ background: '#FFFFFF', border: '1px solid #E5DDD0' }}>
-              <div className="text-xs font-semibold mb-2" style={{ color: '#1E2A3A' }}>💰 PIM vs Ejecución por Centro de Costo (barras superpuestas)</div>
+              <div className="text-xs font-semibold mb-2" style={{ color: '#1E2A3A' }}>💰 PIM vs Ejecución por Centro de Costo</div>
               <ResponsiveContainer width="100%" height={250}>
                 <BarChart data={indicadoresPorCC.map(ind => ({
                   cc: ind.nombre.length > 14 ? ind.nombre.substring(0, 12) + '…' : ind.nombre,
@@ -3885,16 +4752,13 @@ p { text-align: justify; margin: 6px 0; }
                   <Bar dataKey="Ejecutado" fill="#C9A350" radius={[4, 4, 0, 0]} barSize={20} />
                 </BarChart>
               </ResponsiveContainer>
-              <div className="text-[10px] mt-1 text-center" style={{ color: '#7A6F5C' }}>
-                Barra ancha = PIM · Barra angosta superpuesta = Ejecución
-              </div>
             </div>
           )}
 
           {/* Evolución mensual (acumulado) */}
           {tipoInforme === 'acumulado' && (
             <>
-              <h3 className="text-sm font-bold mt-4 mb-2" style={{ color: '#1E2A3A' }}>📈 Evolución mensual de la ejecución (barras superpuestas)</h3>
+              <h3 className="text-sm font-bold mt-4 mb-2" style={{ color: '#1E2A3A' }}>📈 Evolución mensual de la ejecución</h3>
               <p className="text-xs mb-3" style={{ color: '#7A6F5C' }}>
                 Comparativa mensual entre lo programado y lo ejecutado, tanto en avance físico como financiero.
               </p>
@@ -3921,9 +4785,6 @@ p { text-align: justify; margin: 6px 0; }
                     <Bar dataKey="Ejecutado" fill="#C9A350" radius={[4, 4, 0, 0]} barSize={14} />
                   </BarChart>
                 </ResponsiveContainer>
-                <div className="text-[10px] mt-1 text-center" style={{ color: '#7A6F5C' }}>
-                  Barra azul oscuro = Programado · Barra dorada superpuesta = Ejecutado
-                </div>
               </div>
 
               {/* Gráfico FÍSICO mensual: barras superpuestas */}
@@ -3947,9 +4808,6 @@ p { text-align: justify; margin: 6px 0; }
                     <Bar dataKey="Ejecutado" fill="#2D7A4E" radius={[4, 4, 0, 0]} barSize={14} />
                   </BarChart>
                 </ResponsiveContainer>
-                <div className="text-[10px] mt-1 text-center" style={{ color: '#7A6F5C' }}>
-                  Barra azul oscuro = Meta programada · Barra verde superpuesta = Ejecutado
-                </div>
               </div>
 
               {/* Tabla detallada de evolución */}
@@ -3993,15 +4851,18 @@ p { text-align: justify; margin: 6px 0; }
           {indicadoresPorCC.map((ind, idx) => {
             const desc = descripcionesCC[ind.nombre] || '';
             const logros = recolectarLogros(ind.seguimientos, ind.actividadesData);
-            const lims = recolectarLimitaciones(ind.seguimientos, ind.actividadesData);
-            const periodoCC = tipoInforme === 'mensual' ? `En el mes de ${MESES[mes - 1].toLowerCase()}` : `En el período acumulado`;
+            const periodoCC = tipoInforme === 'mensual'
+              ? `En el mes de ${MESES[mes - 1].toLowerCase()} de ${year}`
+              : `En el período acumulado al mes de ${MESES[mes - 1].toLowerCase()} de ${year}`;
+            const resumenConsolidado = construirResumenCC(ind, periodoCC);
 
             return (
               <div key={ind.nombre} className="mb-6 pb-4" style={{ borderBottom: '1px solid #E5DDD0' }}>
                 <h4 className="text-sm font-bold mb-2" style={{ color: '#9C7A2B' }}>3.2.{idx + 1}. {ind.nombre}</h4>
                 {desc && <p className="text-sm text-justify mb-2" style={{ color: '#1E2A3A' }}>{desc}</p>}
-                <p className="text-sm text-justify mb-3" style={{ color: '#1E2A3A' }}>
-                  {periodoCC} se tiene una ejecución financiera de <strong>{fmtMoney(ind.ejecFin)}</strong>. Se tiene una ejecución física promedio de <strong>{ind.pctFis.toFixed(2)}%</strong>.
+
+                <p className="text-sm text-justify mb-3 p-3 rounded" style={{ color: '#1E2A3A', background: '#FAF7F0', borderLeft: '3px solid #C9A350' }}>
+                  <strong>Resumen de resultados:</strong> {resumenConsolidado}
                 </p>
 
                 <div className="grid grid-cols-3 gap-2 mb-3 p-2 rounded" style={{ background: '#FAF7F0', fontSize: 11 }}>
@@ -4013,10 +4874,10 @@ p { text-align: justify; margin: 6px 0; }
                   <div><span style={{ color: '#7A6F5C' }}>Activ.:</span> <strong>{ind.actividades}</strong></div>
                 </div>
 
-                {/* BARRAS SUPERPUESTAS POR CC: una sola gráfica con financiero y físico */}
+                {/* Gráfico PIM vs Ejecución */}
                 <div className="p-3 rounded mb-3" style={{ background: '#FFFFFF', border: '1px solid #E5DDD0' }}>
                   <div className="text-[11px] font-semibold mb-2 text-center" style={{ color: '#1E2A3A' }}>
-                    📊 PIM vs Ejecución (Barras superpuestas)
+                    📊 PIM vs Ejecución
                   </div>
                   <ResponsiveContainer width="100%" height={180}>
                     <BarChart data={[
@@ -4049,23 +4910,15 @@ p { text-align: justify; margin: 6px 0; }
 
                 {logros.length > 0 && (
                   <>
-                    <p className="text-sm font-bold mb-1" style={{ color: '#1E2A3A' }}>Principales Logros:</p>
+                    <p className="text-sm font-bold mb-1" style={{ color: '#1E2A3A' }}>
+                      Principales logros:
+                    </p>
                     <ul className="text-sm ml-4 mb-3" style={{ color: '#1E2A3A' }}>
-                      {logros.slice(0, 10).map((l, i) => (
-                        <li key={i} className="mb-1">• <strong>{l.codigoAOI}</strong>: {l.texto}</li>
-                      ))}
-                    </ul>
-                  </>
-                )}
-
-                {lims.length > 0 && (
-                  <>
-                    <p className="text-sm font-bold mb-1" style={{ color: '#1E2A3A' }}>Limitaciones identificadas:</p>
-                    <ul className="text-sm ml-4" style={{ color: '#1E2A3A' }}>
-                      {lims.slice(0, 5).map((l, i) => (
+                      {logros.map((l, i) => (
                         <li key={i} className="mb-2">
-                          • <strong>{l.codigoAOI}</strong>: {l.texto}
-                          {l.medidas && <div className="ml-4 mt-1"><em>Medidas adoptadas:</em> {l.medidas}</div>}
+                          • <strong>{l.codigoAOI}</strong>
+                          {l.unidadMedida && <span style={{ color: '#7A6F5C' }}> ({l.unidadMedida}, avance acumulado: {l.avanceFisAcum.toFixed(2)})</span>}
+                          : {l.texto}
                         </li>
                       ))}
                     </ul>
@@ -4080,7 +4933,7 @@ p { text-align: justify; margin: 6px 0; }
         <ReportSection num="IV" title="CONCLUSIONES Y RECOMENDACIONES">
           <h3 className="text-sm font-bold mb-2" style={{ color: '#1E2A3A' }}>4.1 Conclusiones</h3>
           <p className="text-sm text-justify mb-2" style={{ color: '#1E2A3A' }}>
-            <strong>4.1.1</strong> El Programa Nuestras Ciudades, {tipoInforme === 'mensual' ? `al culminar el mes de ${MESES[mes - 1].toLowerCase()} de ${year}` : `al período acumulado del año ${year}`} ha alcanzado una ejecución presupuestal de <strong>{fmtMoney(totales.ejecFin)}</strong> que representa el <strong>{totales.pctFin.toFixed(2)}%</strong> del PIM. Asimismo, se tiene un avance de la ejecución física promedio de <strong>{totales.pctFis.toFixed(2)}%</strong>.
+            <strong>4.1.1</strong> El Programa Nuestras Ciudades, {tipoInforme === 'mensual' ? `al culminar el mes de ${MESES[mes - 1].toLowerCase()} de ${year}` : `al período acumulado al mes de ${MESES[mes - 1].toLowerCase()} de ${year}`} ha alcanzado una ejecución presupuestal de <strong>{fmtMoney(totales.ejecFin)}</strong> que representa el <strong>{totales.pctFin.toFixed(2)}%</strong> del PIM. Asimismo, se tiene un avance de la ejecución física promedio de <strong>{totales.pctFis.toFixed(2)}%</strong>.
           </p>
           <p className="text-sm text-justify mb-2" style={{ color: '#1E2A3A' }}>
             <strong>4.1.2</strong> Se ha cumplido con el registro de la información de seguimiento en el aplicativo CEPLAN V.01.
