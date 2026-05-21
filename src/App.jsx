@@ -42,8 +42,75 @@ const fmtMoneyShort = (n) => {
   if (Math.abs(v) >= 1e3) return `S/ ${(v / 1e3).toFixed(1)}K`;
   return `S/ ${v.toFixed(0)}`;
 };
+// Número entero con separador de miles (sin decimales): 1,234,567
+const fmtEntero = (n) => (Number(n) || 0).toLocaleString('es-PE', { minimumFractionDigits: 0, maximumFractionDigits: 0 });
+// Número con 2 decimales y separador de miles: 1,234,567.89
+const fmtDecimal = (n) => (Number(n) || 0).toLocaleString('es-PE', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+// Abreviado en millones enteros para gráficos de barras: 5M
+const fmtMillonesEnteros = (n) => {
+  const v = Number(n) || 0;
+  if (Math.abs(v) >= 1e6) return `${Math.round(v / 1e6)}M`;
+  if (Math.abs(v) >= 1e3) return `${Math.round(v / 1e3)}K`;
+  return `${Math.round(v)}`;
+};
 const fmtPct = (n) => `${(Number(n) || 0).toFixed(1)}%`;
 const uid = () => Math.random().toString(36).slice(2, 10);
+
+// Genéricas de gasto del clasificador presupuestal MEF
+const GENERICAS_GASTO = [
+  { codigo: '2.1', nombre: 'PERSONAL Y OBLIGACIONES SOCIALES' },
+  { codigo: '2.3', nombre: 'BIENES Y SERVICIOS' },
+  { codigo: '2.5', nombre: 'OTROS GASTOS' },
+  { codigo: '2.6', nombre: 'ADQUISICIÓN DE ACTIVOS NO FINANCIEROS' },
+];
+
+// Crea una estructura vacía de genéricas con 12 meses cada una (PIA y PIM)
+function nuevasGenericas() {
+  const g = {};
+  GENERICAS_GASTO.forEach(gen => {
+    g[gen.codigo] = {
+      pia: Array.from({ length: 12 }, () => 0),
+      pim: Array.from({ length: 12 }, () => 0),
+    };
+  });
+  return g;
+}
+
+// Migra una actividad antigua (programacion: [{fisica, financiera}]) al nuevo modelo de genéricas.
+// Coloca el financiero antiguo en la genérica 2.3 BIENES Y SERVICIOS, con PIA = PIM inicialmente.
+function migrarActividadGenericas(a) {
+  if (a.genericas && typeof a.genericas === 'object') return a; // ya migrada
+  const g = nuevasGenericas();
+  if (Array.isArray(a.programacion)) {
+    a.programacion.forEach((p, i) => {
+      const fin = Number(p?.financiera) || 0;
+      g['2.3'].pia[i] = fin;
+      g['2.3'].pim[i] = fin;
+    });
+  }
+  return { ...a, genericas: g };
+}
+
+// Suma total financiera de una actividad para un tipo (pia|pim), opcionalmente hasta cierto mes
+function totalFinancieroActividad(a, tipo, hastaMes = 12) {
+  if (!a.genericas) return 0;
+  let total = 0;
+  GENERICAS_GASTO.forEach(gen => {
+    const arr = a.genericas[gen.codigo]?.[tipo] || [];
+    for (let i = 0; i < hastaMes && i < 12; i++) total += Number(arr[i]) || 0;
+  });
+  return total;
+}
+
+// Suma financiera de un mes específico (índice 0-11) para un tipo
+function financieroMesActividad(a, tipo, mesIdx) {
+  if (!a.genericas) return 0;
+  let total = 0;
+  GENERICAS_GASTO.forEach(gen => {
+    total += Number(a.genericas[gen.codigo]?.[tipo]?.[mesIdx]) || 0;
+  });
+  return total;
+}
 
 // Fecha actual del sistema (simulada para el prototipo)
 const HOY = '2026-05-11';
@@ -330,7 +397,7 @@ export default function App() {
       }
     } catch (e) {}
 
-    setActivities(acts);
+    setActivities(acts.map(migrarActividadGenericas));
     setProgress(progs);
     setModifs(mods);
     setPeriodos(pers);
@@ -663,11 +730,7 @@ function Login({ usuarios, onLogin }) {
             </button>
           </div>
 
-          <button onClick={() => setShowHint(!showHint)}
-            className="mt-5 text-xs flex items-center gap-1 mx-auto"
-            style={{ color: '#9C7A2B' }}>
-            {showHint ? 'Ocultar' : 'Ver'} usuarios de prueba
-          </button>
+          {/* Botón de usuarios de prueba oculto */}
 
           {showHint && (
             <div className="mt-3 p-3 rounded-md text-xs space-y-1" style={{ background: '#FAF7F0', color: '#7A6F5C' }}>
@@ -1023,7 +1086,6 @@ function Dashboard({ activities, progress, modifs, currentUser }) {
   // - modo individual + mesFiltro=0 → acumulado anual (todos los meses)
   // - modo individual + mesFiltro=N → solo ese mes
   // - modo acumulado + mesFiltro=N → enero hasta el mes N (inclusive)
-  const esAcumulado = modoMes === 'individual' && mesFiltro === 0;
   const esAcumuladoHasta = modoMes === 'acumulado' && mesFiltro > 0;
   const mesLabel = esAcumuladoHasta
     ? `Seguimiento al mes de ${MESES[mesFiltro - 1].toLowerCase()}`
@@ -1051,87 +1113,53 @@ function Dashboard({ activities, progress, modifs, currentUser }) {
       })
     : modifs;
 
-  // PIA total (no cambia)
-  const totalPIA = ccsVisible.reduce((s, c) => s + c.pia, 0);
-
-  // PIM: aplica mods según el modo
-  //   - Acumulado anual: todas las mods
-  //   - Mes individual:  mods hasta ese mes (para ver el PIM al cierre del mes)
-  //   - Acumulado hasta: mods hasta el mes seleccionado
-  const modsAplicables = esAcumulado
-    ? modifsVisibles
-    : modifsVisibles.filter(m => m.mes <= mesFiltro);
-  const totalModifs = modsAplicables.reduce((s, m) => s + (Number(m.importe) || 0), 0);
-  const totalPIM = totalPIA + totalModifs;
+  // ============ CÁLCULOS SEGÚN PIA/PIM DE PROGRAMACIÓN ============
+  // PIA = suma de programación PIA (genéricas) de todas las actividades visibles
+  const totalPIA = actsVisibles.reduce((s, a) => s + totalFinancieroActividad(a, 'pia'), 0);
+  // PIM = suma de programación PIM (genéricas) de todas las actividades visibles
+  const totalPIM = actsVisibles.reduce((s, a) => s + totalFinancieroActividad(a, 'pim'), 0);
   const variacionPIM = totalPIA > 0 ? ((totalPIM - totalPIA) / totalPIA) * 100 : 0;
 
-  // Ejecución financiera según modo
-  //   - Acumulado anual:    todos los seguimientos
-  //   - Mes individual:     solo ese mes
-  //   - Acumulado hasta:    enero-mes (mes <= mesFiltro)
-  const progAplicable = esAcumulado
-    ? progVisibles
-    : esAcumuladoHasta
-      ? progVisibles.filter(p => p.mes <= mesFiltro)
-      : progVisibles.filter(p => p.mes === mesFiltro);
-  const totalEjecFin = progAplicable.reduce((s, p) => s + (Number(p.avanceFinanciero) || 0), 0);
+  // Física PIA y PIM anuales
+  const totalFisPIA = actsVisibles.reduce((s, a) => s + (Number(a.metaAnualFisica) || 0), 0);
+  const totalFisPIM = actsVisibles.reduce((s, a) => s + (Number(a.metaAnualFisicaPIM ?? a.metaAnualFisica) || 0), 0);
 
-  // Programado financiero según modo
+  // Ejecución financiera y física según modo
+  //   - Mensual:          ejecución del mes vs programado del mes (PIM del mes)
+  //   - Seguimiento al mes: ejecución acumulada (ene-mes) vs total programado PIM anual
+  const progAplicable = esAcumuladoHasta
+    ? progVisibles.filter(p => p.mes <= mesFiltro)
+    : progVisibles.filter(p => p.mes === mesFiltro);
+  const totalEjecFin = progAplicable.reduce((s, p) => s + (Number(p.avanceFinanciero) || 0), 0);
+  const totalEjecFis = progAplicable.reduce((s, p) => s + (Number(p.avanceFisico) || 0), 0);
+
+  // Programado financiero (referencia para el %)
   let totalProgFin = 0;
-  actsVisibles.forEach(a => {
-    if (esAcumulado) {
-      a.programacion.forEach(p => { totalProgFin += Number(p.financiera) || 0; });
-    } else if (esAcumuladoHasta) {
-      // Sumar enero hasta mesFiltro
-      for (let m = 0; m < mesFiltro; m++) {
-        totalProgFin += Number(a.programacion?.[m]?.financiera) || 0;
-      }
-    } else {
-      totalProgFin += Number(a.programacion?.[mesFiltro - 1]?.financiera) || 0;
-    }
-  });
+  if (esAcumuladoHasta) {
+    // Total programado PIM anual (enero a diciembre)
+    totalProgFin = totalPIM;
+  } else {
+    // Programado PIM del mes seleccionado
+    totalProgFin = actsVisibles.reduce((s, a) => s + financieroMesActividad(a, 'pim', mesFiltro - 1), 0);
+  }
   const ejecFinPct = totalProgFin > 0 ? (totalEjecFin / totalProgFin) * 100 : 0;
 
-  // Avance físico ponderado según modo
-  let totalMetaFis = 0, totalEjecFis = 0;
-  actsVisibles.forEach(a => {
-    if (esAcumulado) {
-      const meta = Number(a.metaAnualFisica) || 0;
-      if (meta > 0) {
-        totalMetaFis += meta;
-        const ejec = progVisibles.filter(p => p.actividadId === a.id).reduce((s, p) => s + (Number(p.avanceFisico) || 0), 0);
-        totalEjecFis += Math.min(ejec, meta);
-      }
-    } else if (esAcumuladoHasta) {
-      // Meta acumulada enero-mes y ejecución acumulada enero-mes
-      let metaAcum = 0;
-      for (let m = 0; m < mesFiltro; m++) {
-        metaAcum += Number(a.programacion?.[m]?.fisica) || 0;
-      }
-      if (metaAcum > 0) {
-        totalMetaFis += metaAcum;
-        const ejecAcum = progVisibles.filter(p => p.actividadId === a.id && p.mes <= mesFiltro)
-          .reduce((s, p) => s + (Number(p.avanceFisico) || 0), 0);
-        totalEjecFis += Math.min(ejecAcum, metaAcum);
-      }
-    } else {
-      const metaMes = Number(a.programacion?.[mesFiltro - 1]?.fisica) || 0;
-      if (metaMes > 0) {
-        totalMetaFis += metaMes;
-        const ejecMes = progVisibles.filter(p => p.actividadId === a.id && p.mes === mesFiltro)
-          .reduce((s, p) => s + (Number(p.avanceFisico) || 0), 0);
-        totalEjecFis += Math.min(ejecMes, metaMes);
-      }
-    }
-  });
+  // Programado físico (referencia para el %)
+  let totalMetaFis = 0;
+  if (esAcumuladoHasta) {
+    // Total programado físico anual (enero a diciembre)
+    totalMetaFis = totalFisPIM;
+  } else {
+    // Programado físico del mes seleccionado
+    totalMetaFis = actsVisibles.reduce((s, a) => s + (Number(a.programacion?.[mesFiltro - 1]?.fisica) || 0), 0);
+  }
   const ejecFisPct = totalMetaFis > 0 ? (totalEjecFis / totalMetaFis) * 100 : 0;
 
   // Gráfico siempre muestra los 12 meses (es la vista temporal)
-  // pero resalta el mes seleccionado si hay filtro
   const chartData = MESES.map((mes, i) => {
     let progFin = 0, progFis = 0;
     actsVisibles.forEach(a => {
-      progFin += Number(a.programacion?.[i]?.financiera) || 0;
+      progFin += financieroMesActividad(a, 'pim', i);
       progFis += Number(a.programacion?.[i]?.fisica) || 0;
     });
     const monthRegs = progVisibles.filter(p => p.mes === i + 1);
@@ -1143,53 +1171,63 @@ function Dashboard({ activities, progress, modifs, currentUser }) {
       Ejecutado: ejecFin,
       ProgFis: progFis,
       EjecFis: ejecFis,
-      seleccionado: !esAcumulado && (i + 1) === mesFiltro,
+      seleccionado: esAcumuladoHasta ? (i + 1) <= mesFiltro : (i + 1) === mesFiltro,
+      esAcumGeneral: false,
     };
+  });
+
+  // Columna "Acumulado General" al final: consolidado anual (todos los meses)
+  // Financiero: PIM total anual vs Ejecutado total anual
+  // Físico: Programado total anual vs Ejecutado total anual
+  const totalEjecFinAnual = progVisibles.reduce((s, p) => s + (Number(p.avanceFinanciero) || 0), 0);
+  const totalEjecFisAnual = progVisibles.reduce((s, p) => s + (Number(p.avanceFisico) || 0), 0);
+  const totalProgFisAnual = actsVisibles.reduce((s, a) =>
+    s + (a.programacion || []).reduce((ss, p) => ss + (Number(p?.fisica) || 0), 0), 0);
+  chartData.push({
+    mes: 'ACUM.',
+    Programado: totalPIM,
+    Ejecutado: totalEjecFinAnual,
+    ProgFis: totalProgFisAnual,
+    EjecFis: totalEjecFisAnual,
+    seleccionado: true,
+    esAcumGeneral: true,
   });
 
   // Resumen por CC según filtro (solo CCs visibles)
   const ccData = ccsVisible.map(cc => {
     const acts = actsVisibles.filter(a => a.centroCosto === cc.nombre);
-    const modsCC = esAcumulado
-      ? modifsVisibles.filter(m => m.centroCosto === cc.nombre)
-      : modifsVisibles.filter(m => m.centroCosto === cc.nombre && m.mes <= mesFiltro);
-    const totalMods = modsCC.reduce((s, m) => s + (Number(m.importe) || 0), 0);
-    const pim = cc.pia + totalMods;
-    const variacion = cc.pia > 0 ? ((pim - cc.pia) / cc.pia) * 100 : 0;
+    // PIA y PIM del CC desde las genéricas
+    const piaCC = acts.reduce((s, a) => s + totalFinancieroActividad(a, 'pia'), 0);
+    const pim = acts.reduce((s, a) => s + totalFinancieroActividad(a, 'pim'), 0);
+    const variacion = piaCC > 0 ? ((pim - piaCC) / piaCC) * 100 : 0;
 
     // Ejecución financiera del CC según filtro
     const ejecFin = progAplicable
       .filter(p => acts.some(a => a.id === p.actividadId))
       .reduce((s, p) => s + (Number(p.avanceFinanciero) || 0), 0);
+    // Programado de referencia: PIM del mes (Mensual) o PIM anual (Seguimiento al mes)
     let progFinCC = 0;
     acts.forEach(a => {
-      if (esAcumulado) a.programacion.forEach(p => { progFinCC += Number(p.financiera) || 0; });
-      else progFinCC += Number(a.programacion?.[mesFiltro - 1]?.financiera) || 0;
+      if (esAcumuladoHasta) progFinCC += totalFinancieroActividad(a, 'pim');
+      else progFinCC += financieroMesActividad(a, 'pim', mesFiltro - 1);
     });
     const ejecFinCCPct = progFinCC > 0 ? (ejecFin / progFinCC) * 100 : 0;
 
-    // Físico ponderado del CC según filtro
+    // Físico del CC según modo
     let metaCC = 0, avCC = 0;
-    acts.forEach(a => {
-      if (esAcumulado) {
-        const meta = Number(a.metaAnualFisica) || 0;
-        if (meta > 0) {
-          metaCC += meta;
-          const ejec = progVisibles.filter(p => p.actividadId === a.id).reduce((s, p) => s + (Number(p.avanceFisico) || 0), 0);
-          avCC += Math.min(ejec, meta);
-        }
-      } else {
-        const metaMes = Number(a.programacion?.[mesFiltro - 1]?.fisica) || 0;
-        if (metaMes > 0) {
-          metaCC += metaMes;
-          const ejecMes = progVisibles.filter(p => p.actividadId === a.id && p.mes === mesFiltro)
-            .reduce((s, p) => s + (Number(p.avanceFisico) || 0), 0);
-          avCC += Math.min(ejecMes, metaMes);
-        }
-      }
-    });
+    if (esAcumuladoHasta) {
+      metaCC = acts.reduce((s, a) => s + (Number(a.metaAnualFisicaPIM ?? a.metaAnualFisica) || 0), 0);
+      avCC = progVisibles.filter(p => p.mes <= mesFiltro && acts.some(a => a.id === p.actividadId))
+        .reduce((s, p) => s + (Number(p.avanceFisico) || 0), 0);
+    } else {
+      acts.forEach(a => {
+        metaCC += Number(a.programacion?.[mesFiltro - 1]?.fisica) || 0;
+      });
+      avCC = progVisibles.filter(p => p.mes === mesFiltro && acts.some(a => a.id === p.actividadId))
+        .reduce((s, p) => s + (Number(p.avanceFisico) || 0), 0);
+    }
     const ejecFisCCPct = metaCC > 0 ? (avCC / metaCC) * 100 : 0;
-    return { ...cc, pim, variacion, actividades: acts.length, ejecFin, ejecFinPct: ejecFinCCPct, ejecFisPct: ejecFisCCPct };
+    return { ...cc, pia: piaCC, pim, variacion, actividades: acts.length, ejecFin, ejecFinPct: ejecFinCCPct, ejecFisPct: ejecFisCCPct };
   });
 
   return (
@@ -1199,10 +1237,10 @@ function Dashboard({ activities, progress, modifs, currentUser }) {
       <MesFiltro mesFiltro={mesFiltro} setMesFiltro={setMesFiltro} modoMes={modoMes} setModoMes={setModoMes} />
 
       <div className="grid grid-cols-2 gap-4 mb-8">
-        <KPI icon={Wallet} label="PIA institucional" value={fmtMoneyShort(totalPIA)} hint="presupuesto inicial" />
+        <KPI icon={Wallet} label="PIA (programación PIA)" value={`S/ ${fmtEntero(totalPIA)}`} hint="presupuesto inicial de apertura" />
         <KPI icon={TrendingUp}
-          label={esAcumulado ? 'PIM vigente' : `PIM al cierre de ${MESES[mesFiltro-1]}`}
-          value={fmtMoneyShort(totalPIM)}
+          label="PIM (programación PIM)"
+          value={`S/ ${fmtEntero(totalPIM)}`}
           hint={`${variacionPIM >= 0 ? '+' : ''}${variacionPIM.toFixed(2)}% vs PIA`}
           highlight />
       </div>
@@ -1211,22 +1249,26 @@ function Dashboard({ activities, progress, modifs, currentUser }) {
       <div className="grid grid-cols-2 gap-4 mb-8">
         <Card className="p-6 flex flex-col items-center justify-center">
           <div className="text-xs uppercase tracking-widest mb-3" style={{ color: '#9C7A2B' }}>
-            {esAcumulado ? 'Avance ejecución financiera acumulada' : `Avance ejecución financiera — ${MESES[mesFiltro-1]}`}
+            {esAcumuladoHasta
+              ? `Ejecución financiera al mes de ${MESES[mesFiltro-1].toLowerCase()} vs PIM anual`
+              : `Ejecución financiera — ${MESES[mesFiltro-1]} (vs programado del mes)`}
           </div>
           <GaugeCircular
             pct={ejecFinPct}
-            label={`${fmtMoneyShort(totalEjecFin)} de ${fmtMoneyShort(totalProgFin)}`}
+            label={`S/ ${fmtEntero(totalEjecFin)} de S/ ${fmtEntero(totalProgFin)}`}
             sublabel="ejecutado"
             size={180}
           />
         </Card>
         <Card className="p-6 flex flex-col items-center justify-center">
           <div className="text-xs uppercase tracking-widest mb-3" style={{ color: '#9C7A2B' }}>
-            {esAcumulado ? 'Avance ejecución física acumulada' : `Avance ejecución física — ${MESES[mesFiltro-1]}`}
+            {esAcumuladoHasta
+              ? `Ejecución física al mes de ${MESES[mesFiltro-1].toLowerCase()} vs física anual`
+              : `Ejecución física — ${MESES[mesFiltro-1]} (vs programado del mes)`}
           </div>
           <GaugeCircular
             pct={ejecFisPct}
-            label={`${totalEjecFis.toFixed(0)} de ${totalMetaFis.toFixed(0)} unidades`}
+            label={`${fmtEntero(totalEjecFis)} de ${fmtEntero(totalMetaFis)} unidades`}
             sublabel="cumplido"
             size={180}
           />
@@ -1240,27 +1282,27 @@ function Dashboard({ activities, progress, modifs, currentUser }) {
             Ejecución financiera mensual
           </div>
           <div className="text-xs mt-1" style={{ color: '#7A6F5C' }}>
-            Programado vs ejecutado {!esAcumulado && `— Mes resaltado: ${MESES[mesFiltro-1]}`}
+            Programado (PIM) vs ejecutado {!esAcumuladoHasta && `— Mes resaltado: ${MESES[mesFiltro-1]}`}
           </div>
         </div>
         <ResponsiveContainer width="100%" height={300}>
           <BarChart data={chartData} barCategoryGap="20%" barGap={-30}>
             <CartesianGrid strokeDasharray="3 3" stroke="#E5DDD0" />
             <XAxis dataKey="mes" tick={{ fontSize: 11, fill: '#7A6F5C' }} />
-            <YAxis tick={{ fontSize: 11, fill: '#7A6F5C' }} tickFormatter={fmtMoneyShort} />
+            <YAxis tick={{ fontSize: 11, fill: '#7A6F5C' }} tickFormatter={fmtMillonesEnteros} />
             <Tooltip
               contentStyle={{ background: '#FFF', border: '1px solid #E5DDD0', borderRadius: 6, fontSize: 12 }}
               formatter={(v) => fmtMoney(v)} />
             <Legend wrapperStyle={{ fontSize: 12 }} />
             <Bar dataKey="Programado" name="Programado" radius={[3, 3, 0, 0]} barSize={38}>
               {chartData.map((d, i) => (
-                <Cell key={i} fill={esAcumulado || d.seleccionado ? '#8A8A8A' : '#C9C9C9'} />
+                <Cell key={i} fill={d.esAcumGeneral ? '#1E2A3A' : (d.seleccionado ? '#8A8A8A' : '#C9C9C9')} />
               ))}
             </Bar>
             <Bar dataKey="Ejecutado" name="Ejecutado" radius={[3, 3, 0, 0]} barSize={22}>
               {chartData.map((d, i) => {
                 const pctMes = d.Programado > 0 ? (d.Ejecutado / d.Programado) * 100 : 0;
-                const color = esAcumulado || d.seleccionado ? colorEjecucion(pctMes) : colorEjecucionTenue(pctMes);
+                const color = d.esAcumGeneral ? '#C9A350' : (d.seleccionado ? colorEjecucion(pctMes) : colorEjecucionTenue(pctMes));
                 return <Cell key={i} fill={color} />;
               })}
             </Bar>
@@ -1275,7 +1317,7 @@ function Dashboard({ activities, progress, modifs, currentUser }) {
             Ejecución física mensual
           </div>
           <div className="text-xs mt-1" style={{ color: '#7A6F5C' }}>
-            Programado vs ejecutado {!esAcumulado && `— Mes resaltado: ${MESES[mesFiltro-1]}`}
+            Programado vs ejecutado {esAcumuladoHasta ? `— Acumulado a ${MESES[mesFiltro-1].toLowerCase()}` : `— Mes: ${MESES[mesFiltro-1]}`}
           </div>
         </div>
         <ResponsiveContainer width="100%" height={300}>
@@ -1287,13 +1329,13 @@ function Dashboard({ activities, progress, modifs, currentUser }) {
             <Legend wrapperStyle={{ fontSize: 12 }} />
             <Bar dataKey="ProgFis" name="Programado" radius={[3, 3, 0, 0]} barSize={38}>
               {chartData.map((d, i) => (
-                <Cell key={i} fill={esAcumulado || d.seleccionado ? '#8A8A8A' : '#C9C9C9'} />
+                <Cell key={i} fill={d.esAcumGeneral ? '#1E2A3A' : (d.seleccionado ? '#8A8A8A' : '#C9C9C9')} />
               ))}
             </Bar>
             <Bar dataKey="EjecFis" name="Ejecutado" radius={[3, 3, 0, 0]} barSize={22}>
               {chartData.map((d, i) => {
                 const pctMes = d.ProgFis > 0 ? (d.EjecFis / d.ProgFis) * 100 : 0;
-                const color = esAcumulado || d.seleccionado ? colorEjecucion(pctMes) : colorEjecucionTenue(pctMes);
+                const color = d.esAcumGeneral ? '#C9A350' : (d.seleccionado ? colorEjecucion(pctMes) : colorEjecucionTenue(pctMes));
                 return <Cell key={i} fill={color} />;
               })}
             </Bar>
@@ -1306,7 +1348,7 @@ function Dashboard({ activities, progress, modifs, currentUser }) {
           <div style={{ fontFamily: "'Fraunces', serif", fontSize: 20, fontWeight: 500, color: '#1E2A3A' }}>
             Resumen por centro de costo
           </div>
-          <Pill bg={esAcumulado ? '#F0E9D9' : '#FBF1D9'} color={esAcumulado ? '#1E2A3A' : '#9C7A2B'}>
+          <Pill bg={esAcumuladoHasta ? '#E8F2EC' : '#FBF1D9'} color={esAcumuladoHasta ? '#2D7A4E' : '#9C7A2B'}>
             {mesLabel}
           </Pill>
         </div>
@@ -1427,7 +1469,6 @@ function CentrosCosto({ activities, progress, modifs, currentUser }) {
   const [ccSel, setCcSel] = useState(ccDisponibles[0] || CENTROS_COSTO[0].nombre);
   const [mesFiltro, setMesFiltro] = useState(new Date().getMonth() + 1);
   const [modoMes, setModoMes] = useState('individual');
-  const esAcumulado = modoMes === 'individual' && mesFiltro === 0;
   const esAcumuladoHasta = modoMes === 'acumulado' && mesFiltro > 0;
   const mesLabel = esAcumuladoHasta
     ? `Seguimiento al mes de ${MESES[mesFiltro - 1].toLowerCase()}`
@@ -1440,27 +1481,21 @@ function CentrosCosto({ activities, progress, modifs, currentUser }) {
     ? filtrarActividadesUsuario(activities.filter(a => a.centroCosto === ccSel), currentUser)
     : activities.filter(a => a.centroCosto === ccSel);
 
-  // Modificaciones aplicables según filtro (acumuladas hasta el mes o todas)
-  const modsCCAplic = esAcumulado
-    ? modifs.filter(m => m.centroCosto === ccSel)
-    : modifs.filter(m => m.centroCosto === ccSel && m.mes <= mesFiltro);
-  const totalMods = modsCCAplic.reduce((s, m) => s + (Number(m.importe) || 0), 0);
-  const pim = cc.pia + totalMods;
-  const variacion = cc.pia > 0 ? ((pim - cc.pia) / cc.pia) * 100 : 0;
+  // PIA y PIM del CC desde las genéricas de programación
+  const piaCC = acts.reduce((s, a) => s + totalFinancieroActividad(a, 'pia'), 0);
+  const pim = acts.reduce((s, a) => s + totalFinancieroActividad(a, 'pim'), 0);
+  const variacion = piaCC > 0 ? ((pim - piaCC) / piaCC) * 100 : 0;
 
-  // Conteo de modificaciones según modo
-  const modsMes = esAcumulado
-    ? modifs.filter(m => m.centroCosto === ccSel)
-    : esAcumuladoHasta
-      ? modifs.filter(m => m.centroCosto === ccSel && m.mes <= mesFiltro)
-      : modifs.filter(m => m.centroCosto === ccSel && m.mes === mesFiltro);
+  // Física PIA y PIM anuales del CC
+  const fisPIA_CC = acts.reduce((s, a) => s + (Number(a.metaAnualFisica) || 0), 0);
+  const fisPIM_CC = acts.reduce((s, a) => s + (Number(a.metaAnualFisicaPIM ?? a.metaAnualFisica) || 0), 0);
 
-  // Datos mensuales: prog/ejec físico y financiero por mes, con acumulados
+  // Datos mensuales: prog (PIM) / ejec físico y financiero por mes, con acumulados
   const data = MESES.map((mes, i) => {
     let progFis = 0, progFin = 0;
     acts.forEach(a => {
       progFis += Number(a.programacion?.[i]?.fisica) || 0;
-      progFin += Number(a.programacion?.[i]?.financiera) || 0;
+      progFin += financieroMesActividad(a, 'pim', i);
     });
     const monthProgs = progress.filter(p => p.mes === i + 1 && acts.some(a => a.id === p.actividadId));
     const ejecFis = monthProgs.reduce((s, p) => s + (Number(p.avanceFisico) || 0), 0);
@@ -1477,24 +1512,33 @@ function CentrosCosto({ activities, progress, modifs, currentUser }) {
 
   // Marcar el mes seleccionado o el rango acumulado
   data.forEach(d => {
-    if (esAcumuladoHasta) {
-      d.seleccionado = d.mesIdx <= mesFiltro;
-    } else {
-      d.seleccionado = !esAcumulado && d.mesIdx === mesFiltro;
-    }
+    d.seleccionado = esAcumuladoHasta ? d.mesIdx <= mesFiltro : d.mesIdx === mesFiltro;
+    d.esAcumGeneral = false;
+  });
+
+  // Columna "Acumulado General" al final: consolidado anual del CC
+  const totProgFisAnualCC = data.reduce((s, d) => s + d.progFis, 0);
+  const totProgFinAnualCC = data.reduce((s, d) => s + d.progFin, 0);
+  const totEjecFisAnualCC = data.reduce((s, d) => s + d.ejecFis, 0);
+  const totEjecFinAnualCC = data.reduce((s, d) => s + d.ejecFin, 0);
+  data.push({
+    mes: 'ACUM.',
+    mesIdx: 13,
+    progFis: totProgFisAnualCC,
+    progFin: totProgFinAnualCC,
+    ejecFis: totEjecFisAnualCC,
+    ejecFin: totEjecFinAnualCC,
+    seleccionado: true,
+    esAcumGeneral: true,
   });
 
   // Cálculo de KPIs según modo
+  //   - Mensual:           ejec del mes vs programado PIM del mes
+  //   - Seguimiento al mes: ejec acumulada (ene-mes) vs total PIM/física anual
   let kpiProgFis, kpiProgFin, kpiEjecFis, kpiEjecFin;
-  if (esAcumulado) {
-    kpiProgFis = data.reduce((s, d) => s + d.progFis, 0);
-    kpiProgFin = data.reduce((s, d) => s + d.progFin, 0);
-    kpiEjecFis = data.reduce((s, d) => s + d.ejecFis, 0);
-    kpiEjecFin = data.reduce((s, d) => s + d.ejecFin, 0);
-  } else if (esAcumuladoHasta) {
-    // Sumar enero a mesFiltro
-    kpiProgFis = data.slice(0, mesFiltro).reduce((s, d) => s + d.progFis, 0);
-    kpiProgFin = data.slice(0, mesFiltro).reduce((s, d) => s + d.progFin, 0);
+  if (esAcumuladoHasta) {
+    kpiProgFin = pim;          // total PIM anual del CC
+    kpiProgFis = fisPIM_CC;    // total física anual del CC
     kpiEjecFis = data.slice(0, mesFiltro).reduce((s, d) => s + d.ejecFis, 0);
     kpiEjecFin = data.slice(0, mesFiltro).reduce((s, d) => s + d.ejecFin, 0);
   } else {
@@ -1545,7 +1589,7 @@ function CentrosCosto({ activities, progress, modifs, currentUser }) {
             <div className="text-sm mt-2" style={{ color: '#7A6F5C' }}>{cc.desc}</div>
           </div>
           <div className="text-right">
-            <Pill bg={esAcumulado ? '#F0E9D9' : '#FBF1D9'} color={esAcumulado ? '#1E2A3A' : '#9C7A2B'}>
+            <Pill bg={esAcumuladoHasta ? '#E8F2EC' : '#FBF1D9'} color={esAcumuladoHasta ? '#2D7A4E' : '#9C7A2B'}>
               {mesLabel}
             </Pill>
           </div>
@@ -1553,10 +1597,10 @@ function CentrosCosto({ activities, progress, modifs, currentUser }) {
       </Card>
 
       <div className="grid grid-cols-2 gap-4 mb-6">
-        <KPI icon={Wallet} label="PIA" value={fmtMoneyShort(cc.pia)} hint="Presupuesto inicial" />
+        <KPI icon={Wallet} label="PIA (programación PIA)" value={`S/ ${fmtEntero(piaCC)}`} hint="Presupuesto inicial de apertura" />
         <KPI icon={TrendingUp}
-          label={esAcumulado ? 'PIM' : `PIM al ${MESES[mesFiltro-1]}`}
-          value={fmtMoneyShort(pim)}
+          label="PIM (programación PIM)"
+          value={`S/ ${fmtEntero(pim)}`}
           hint={`${variacion >= 0 ? '+' : ''}${variacion.toFixed(2)}% vs PIA`}
           highlight />
       </div>
@@ -1565,22 +1609,26 @@ function CentrosCosto({ activities, progress, modifs, currentUser }) {
       <div className="grid grid-cols-2 gap-4 mb-6">
         <Card className="p-6 flex flex-col items-center justify-center">
           <div className="text-xs uppercase tracking-widest mb-3" style={{ color: '#9C7A2B' }}>
-            {esAcumulado ? 'Avance ejecución financiera acumulada' : `Avance ejecución financiera — ${MESES[mesFiltro-1]}`}
+            {esAcumuladoHasta
+              ? `Ejecución financiera al mes de ${MESES[mesFiltro-1].toLowerCase()} vs PIM anual`
+              : `Ejecución financiera — ${MESES[mesFiltro-1]} (vs programado del mes)`}
           </div>
           <GaugeCircular
             pct={ejecFinPct}
-            label={`${fmtMoneyShort(kpiEjecFin)} de ${fmtMoneyShort(kpiProgFin)}`}
+            label={`S/ ${fmtEntero(kpiEjecFin)} de S/ ${fmtEntero(kpiProgFin)}`}
             sublabel="ejecutado"
             size={180}
           />
         </Card>
         <Card className="p-6 flex flex-col items-center justify-center">
           <div className="text-xs uppercase tracking-widest mb-3" style={{ color: '#9C7A2B' }}>
-            {esAcumulado ? 'Avance ejecución física acumulada' : `Avance ejecución física — ${MESES[mesFiltro-1]}`}
+            {esAcumuladoHasta
+              ? `Ejecución física al mes de ${MESES[mesFiltro-1].toLowerCase()} vs física anual`
+              : `Ejecución física — ${MESES[mesFiltro-1]} (vs programado del mes)`}
           </div>
           <GaugeCircular
             pct={ejecFisPct}
-            label={`${kpiEjecFis.toFixed(0)} de ${kpiProgFis.toFixed(0)} unidades`}
+            label={`${fmtEntero(kpiEjecFis)} de ${fmtEntero(kpiProgFis)} unidades`}
             sublabel="cumplido"
             size={180}
           />
@@ -1595,16 +1643,16 @@ function CentrosCosto({ activities, progress, modifs, currentUser }) {
               Ejecución física mensual
             </div>
             <div className="text-xs mt-1" style={{ color: '#7A6F5C' }}>
-              Programado vs ejecutado {!esAcumulado && `— Mes resaltado: ${MESES[mesFiltro-1]}`}
+              Programado vs ejecutado {esAcumuladoHasta ? `— Acumulado a ${MESES[mesFiltro-1].toLowerCase()}` : `— Mes: ${MESES[mesFiltro-1]}`}
             </div>
           </div>
           <div className="flex gap-4 text-xs">
             <div>
-              <div className="uppercase tracking-wider" style={{ color: '#7A6F5C' }}>{esAcumulado ? 'Total prog.' : 'Prog. del mes'}</div>
+              <div className="uppercase tracking-wider" style={{ color: '#7A6F5C' }}>{esAcumuladoHasta ? 'Prog. anual (PIM)' : 'Prog. del mes'}</div>
               <div className="font-semibold" style={{ color: '#1E2A3A' }}>{kpiProgFis.toFixed(0)}</div>
             </div>
             <div>
-              <div className="uppercase tracking-wider" style={{ color: '#7A6F5C' }}>{esAcumulado ? 'Total ejec.' : 'Ejec. del mes'}</div>
+              <div className="uppercase tracking-wider" style={{ color: '#7A6F5C' }}>{esAcumuladoHasta ? 'Ejec. acumulada' : 'Ejec. del mes'}</div>
               <div className="font-semibold" style={{ color: colorEjecucion(ejecFisPct) }}>{kpiEjecFis.toFixed(0)}</div>
             </div>
           </div>
@@ -1618,13 +1666,13 @@ function CentrosCosto({ activities, progress, modifs, currentUser }) {
             <Legend wrapperStyle={{ fontSize: 12 }} />
             <Bar dataKey="progFis" name="Programado" radius={[3, 3, 0, 0]} barSize={38}>
               {data.map((d, i) => (
-                <Cell key={i} fill={esAcumulado || d.seleccionado ? '#8A8A8A' : '#C9C9C9'} />
+                <Cell key={i} fill={d.esAcumGeneral ? '#1E2A3A' : (d.seleccionado ? '#8A8A8A' : '#C9C9C9')} />
               ))}
             </Bar>
             <Bar dataKey="ejecFis" name="Ejecutado" radius={[3, 3, 0, 0]} barSize={22}>
               {data.map((d, i) => {
                 const pctMes = d.progFis > 0 ? (d.ejecFis / d.progFis) * 100 : 0;
-                const color = esAcumulado || d.seleccionado ? colorEjecucion(pctMes) : colorEjecucionTenue(pctMes);
+                const color = d.esAcumGeneral ? '#C9A350' : (d.seleccionado ? colorEjecucion(pctMes) : colorEjecucionTenue(pctMes));
                 return <Cell key={i} fill={color} />;
               })}
             </Bar>
@@ -1640,16 +1688,16 @@ function CentrosCosto({ activities, progress, modifs, currentUser }) {
               Ejecución financiera mensual
             </div>
             <div className="text-xs mt-1" style={{ color: '#7A6F5C' }}>
-              Programado vs ejecutado {!esAcumulado && `— Mes resaltado: ${MESES[mesFiltro-1]}`}
+              Programado (PIM) vs ejecutado {esAcumuladoHasta ? `— Acumulado a ${MESES[mesFiltro-1].toLowerCase()}` : `— Mes: ${MESES[mesFiltro-1]}`}
             </div>
           </div>
           <div className="flex gap-4 text-xs">
             <div>
-              <div className="uppercase tracking-wider" style={{ color: '#7A6F5C' }}>{esAcumulado ? 'Total prog.' : 'Prog. del mes'}</div>
+              <div className="uppercase tracking-wider" style={{ color: '#7A6F5C' }}>{esAcumuladoHasta ? 'Prog. anual (PIM)' : 'Prog. del mes'}</div>
               <div className="font-semibold" style={{ color: '#1E2A3A' }}>{fmtMoneyShort(kpiProgFin)}</div>
             </div>
             <div>
-              <div className="uppercase tracking-wider" style={{ color: '#7A6F5C' }}>{esAcumulado ? 'Total ejec.' : 'Ejec. del mes'}</div>
+              <div className="uppercase tracking-wider" style={{ color: '#7A6F5C' }}>{esAcumuladoHasta ? 'Ejec. acumulada' : 'Ejec. del mes'}</div>
               <div className="font-semibold" style={{ color: colorEjecucion(ejecFinPct) }}>{fmtMoneyShort(kpiEjecFin)}</div>
             </div>
           </div>
@@ -1658,18 +1706,18 @@ function CentrosCosto({ activities, progress, modifs, currentUser }) {
           <BarChart data={data} barCategoryGap="20%" barGap={-30}>
             <CartesianGrid strokeDasharray="3 3" stroke="#E5DDD0" />
             <XAxis dataKey="mes" tick={{ fontSize: 11, fill: '#7A6F5C' }} />
-            <YAxis tick={{ fontSize: 11, fill: '#7A6F5C' }} tickFormatter={fmtMoneyShort} />
+            <YAxis tick={{ fontSize: 11, fill: '#7A6F5C' }} tickFormatter={fmtMillonesEnteros} />
             <Tooltip contentStyle={{ background: '#FFF', border: '1px solid #E5DDD0', fontSize: 12 }} formatter={(v) => fmtMoney(v)} />
             <Legend wrapperStyle={{ fontSize: 12 }} />
             <Bar dataKey="progFin" name="Programado" radius={[3, 3, 0, 0]} barSize={38}>
               {data.map((d, i) => (
-                <Cell key={i} fill={esAcumulado || d.seleccionado ? '#8A8A8A' : '#C9C9C9'} />
+                <Cell key={i} fill={d.esAcumGeneral ? '#1E2A3A' : (d.seleccionado ? '#8A8A8A' : '#C9C9C9')} />
               ))}
             </Bar>
             <Bar dataKey="ejecFin" name="Ejecutado" radius={[3, 3, 0, 0]} barSize={22}>
               {data.map((d, i) => {
                 const pctMes = d.progFin > 0 ? (d.ejecFin / d.progFin) * 100 : 0;
-                const color = esAcumulado || d.seleccionado ? colorEjecucion(pctMes) : colorEjecucionTenue(pctMes);
+                const color = d.esAcumGeneral ? '#C9A350' : (d.seleccionado ? colorEjecucion(pctMes) : colorEjecucionTenue(pctMes));
                 return <Cell key={i} fill={color} />;
               })}
             </Bar>
@@ -1690,7 +1738,7 @@ function CentrosCosto({ activities, progress, modifs, currentUser }) {
                 : `Datos del mes de ${MESES[mesFiltro-1]}`}
             </div>
           </div>
-          <Pill bg={esAcumulado ? '#F0E9D9' : '#FBF1D9'} color={esAcumulado ? '#1E2A3A' : '#9C7A2B'}>
+          <Pill bg={esAcumuladoHasta ? '#E8F2EC' : '#FBF1D9'} color={esAcumuladoHasta ? '#2D7A4E' : '#9C7A2B'}>
             {mesLabel}
           </Pill>
         </div>
@@ -1717,17 +1765,17 @@ function CentrosCosto({ activities, progress, modifs, currentUser }) {
               )}
               {acts.map((a) => {
                 let progFis, progFin, ejecFis, ejecFin;
-                if (esAcumulado) {
-                  // Acumulado anual: meta y presupuesto totales, ejec sumado de todos los meses
-                  progFis = Number(a.metaAnualFisica) || 0;
-                  progFin = Number(a.presupuestoAnual) || 0;
-                  const regs = progress.filter(p => p.actividadId === a.id);
+                if (esAcumuladoHasta) {
+                  // Seguimiento al mes: programado anual PIM, ejecución acumulada ene-mes
+                  progFis = Number(a.metaAnualFisicaPIM ?? a.metaAnualFisica) || 0;
+                  progFin = totalFinancieroActividad(a, 'pim');
+                  const regs = progress.filter(p => p.actividadId === a.id && p.mes <= mesFiltro);
                   ejecFis = regs.reduce((s, p) => s + (Number(p.avanceFisico) || 0), 0);
                   ejecFin = regs.reduce((s, p) => s + (Number(p.avanceFinanciero) || 0), 0);
                 } else {
-                  // Mes específico
+                  // Mensual: programado PIM del mes, ejecución del mes
                   progFis = Number(a.programacion?.[mesFiltro-1]?.fisica) || 0;
-                  progFin = Number(a.programacion?.[mesFiltro-1]?.financiera) || 0;
+                  progFin = financieroMesActividad(a, 'pim', mesFiltro - 1);
                   const reg = progress.find(p => p.actividadId === a.id && p.mes === mesFiltro);
                   ejecFis = reg ? Number(reg.avanceFisico) || 0 : 0;
                   ejecFin = reg ? Number(reg.avanceFinanciero) || 0 : 0;
@@ -1742,13 +1790,13 @@ function CentrosCosto({ activities, progress, modifs, currentUser }) {
                       <div className="text-xs mt-0.5" style={{ color: '#9C7A2B' }}>{a.area}</div>
                     </td>
                     <td className="px-2 py-2 text-center" style={{ color: '#7A6F5C' }}>{a.unidadMedida}</td>
-                    <td className="px-2 py-2 text-right" style={{ color: '#1E2A3A' }}>{progFis.toFixed(0)}</td>
-                    <td className="px-2 py-2 text-right font-semibold" style={{ color: '#C9A350' }}>{ejecFis.toFixed(0)}</td>
+                    <td className="px-2 py-2 text-right" style={{ color: '#1E2A3A' }}>{fmtEntero(progFis)}</td>
+                    <td className="px-2 py-2 text-right font-semibold" style={{ color: '#C9A350' }}>{fmtEntero(ejecFis)}</td>
                     <td className="px-2 py-2">
                       <ProgressMini pct={pctFis} />
                     </td>
-                    <td className="px-2 py-2 text-right" style={{ color: '#1E2A3A' }}>{fmtMoneyShort(progFin)}</td>
-                    <td className="px-2 py-2 text-right font-semibold" style={{ color: '#C9A350' }}>{fmtMoneyShort(ejecFin)}</td>
+                    <td className="px-2 py-2 text-right" style={{ color: '#1E2A3A' }}>{fmtEntero(progFin)}</td>
+                    <td className="px-2 py-2 text-right font-semibold" style={{ color: '#C9A350' }}>{fmtEntero(ejecFin)}</td>
                     <td className="px-2 py-2">
                       <ProgressMini pct={pctFin} />
                     </td>
@@ -1759,15 +1807,15 @@ function CentrosCosto({ activities, progress, modifs, currentUser }) {
               {acts.length > 0 && (() => {
                 let totProgFis = 0, totProgFin = 0, totEjecFis = 0, totEjecFin = 0;
                 acts.forEach(a => {
-                  if (esAcumulado) {
-                    totProgFis += Number(a.metaAnualFisica) || 0;
-                    totProgFin += Number(a.presupuestoAnual) || 0;
-                    const regs = progress.filter(p => p.actividadId === a.id);
+                  if (esAcumuladoHasta) {
+                    totProgFis += Number(a.metaAnualFisicaPIM ?? a.metaAnualFisica) || 0;
+                    totProgFin += totalFinancieroActividad(a, 'pim');
+                    const regs = progress.filter(p => p.actividadId === a.id && p.mes <= mesFiltro);
                     totEjecFis += regs.reduce((s, p) => s + (Number(p.avanceFisico) || 0), 0);
                     totEjecFin += regs.reduce((s, p) => s + (Number(p.avanceFinanciero) || 0), 0);
                   } else {
                     totProgFis += Number(a.programacion?.[mesFiltro-1]?.fisica) || 0;
-                    totProgFin += Number(a.programacion?.[mesFiltro-1]?.financiera) || 0;
+                    totProgFin += financieroMesActividad(a, 'pim', mesFiltro - 1);
                     const reg = progress.find(p => p.actividadId === a.id && p.mes === mesFiltro);
                     if (reg) {
                       totEjecFis += Number(reg.avanceFisico) || 0;
@@ -1780,11 +1828,11 @@ function CentrosCosto({ activities, progress, modifs, currentUser }) {
                 return (
                   <tr style={{ background: '#F0E9D9' }}>
                     <td className="px-2 py-2 font-bold" style={{ color: '#1E2A3A' }} colSpan={3}>TOTAL</td>
-                    <td className="px-2 py-2 text-right font-bold" style={{ color: '#1E2A3A' }}>{totProgFis.toFixed(0)}</td>
-                    <td className="px-2 py-2 text-right font-bold" style={{ color: '#C9A350' }}>{totEjecFis.toFixed(0)}</td>
+                    <td className="px-2 py-2 text-right font-bold" style={{ color: '#1E2A3A' }}>{fmtEntero(totProgFis)}</td>
+                    <td className="px-2 py-2 text-right font-bold" style={{ color: '#C9A350' }}>{fmtEntero(totEjecFis)}</td>
                     <td className="px-2 py-2 text-center font-bold" style={{ color: '#1E2A3A' }}>{fmtPct(totPctFis)}</td>
-                    <td className="px-2 py-2 text-right font-bold" style={{ color: '#1E2A3A' }}>{fmtMoneyShort(totProgFin)}</td>
-                    <td className="px-2 py-2 text-right font-bold" style={{ color: '#C9A350' }}>{fmtMoneyShort(totEjecFin)}</td>
+                    <td className="px-2 py-2 text-right font-bold" style={{ color: '#1E2A3A' }}>{fmtEntero(totProgFin)}</td>
+                    <td className="px-2 py-2 text-right font-bold" style={{ color: '#C9A350' }}>{fmtEntero(totEjecFin)}</td>
                     <td className="px-2 py-2 text-center font-bold" style={{ color: '#1E2A3A' }}>{fmtPct(totPctFin)}</td>
                   </tr>
                 );
@@ -1807,11 +1855,66 @@ function Programacion({ activities, saveActivities, currentUser, reprogramacione
   const [isNew, setIsNew] = useState(false);
   const [filtroCC, setFiltroCC] = useState(esResponsableCC(currentUser) ? currentUser.centroCosto : 'TODOS');
   const [filtroArea, setFiltroArea] = useState('TODAS');
+  const [filtroMesProg, setFiltroMesProg] = useState(0); // 0 = año completo; 1-12 = ver columna de ese mes
   const [verHistorial, setVerHistorial] = useState(null);
   const [showGestionAreas, setShowGestionAreas] = useState(false);
 
   // Usar areasPorCC dinámico si fue pasado por props; fallback al estático
   const areasMap = areasPorCC || AREAS_POR_CC;
+
+  // Exportar la programación a Excel (CSV compatible con Excel, separado por ;)
+  function exportarProgramacionExcel() {
+    const rows = [];
+    // Cabecera
+    const cab = ['CC', 'Área', 'Cód. AOI', 'Actividad', 'Unidad', 'Genérica',
+      'Tipo (PIA/PIM)', ...MESES, 'Total'];
+    rows.push(cab);
+
+    // Por cada actividad filtrada, una fila por genérica y tipo
+    filtered.forEach(a => {
+      const act = a.genericas ? a : migrarActividadGenericas(a);
+      GENERICAS_GASTO.forEach(gen => {
+        ['pia', 'pim'].forEach(tipo => {
+          const arr = act.genericas?.[gen.codigo]?.[tipo] || Array(12).fill(0);
+          const total = arr.reduce((s, v) => s + (Number(v) || 0), 0);
+          if (total === 0) return; // omitir genéricas vacías
+          rows.push([
+            a.centroCosto, a.area || '', a.codigoAOI, a.nombre, a.unidadMedida || '',
+            `${gen.codigo} ${gen.nombre}`, tipo.toUpperCase(),
+            ...arr.map(v => (Number(v) || 0).toFixed(2)), total.toFixed(2),
+          ]);
+        });
+      });
+      // Fila de física
+      const fis = (act.programacion || []).map(p => Number(p?.fisica) || 0);
+      const totalFis = fis.reduce((s, v) => s + v, 0);
+      rows.push([
+        a.centroCosto, a.area || '', a.codigoAOI, a.nombre, a.unidadMedida || '',
+        'META FÍSICA', 'PIM',
+        ...fis.map(v => v.toFixed(0)), totalFis.toFixed(0),
+      ]);
+    });
+
+    // Construir CSV con BOM para que Excel reconozca UTF-8
+    const csv = '\ufeff' + rows.map(r =>
+      r.map(c => {
+        const s = String(c).replace(/"/g, '""');
+        return /[;"\n]/.test(s) ? `"${s}"` : s;
+      }).join(';')
+    ).join('\n');
+
+    const blob = new Blob([csv], { type: 'text/csv;charset=utf-8;' });
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement('a');
+    link.href = url;
+    const sufijo = filtroCC === 'TODOS' ? 'TODOS' : filtroCC.replace(/\s+/g, '_');
+    link.download = `Programacion_POI_${sufijo}_2026.csv`;
+    document.body.appendChild(link);
+    link.click();
+    document.body.removeChild(link);
+    URL.revokeObjectURL(url);
+    if (logAuditoria) logAuditoria('exportar_programacion', `Exportó la programación POI (${sufijo}) a Excel`, {});
+  }
 
   // Eliminar un área (con validación)
   async function handleEliminarArea(cc, area) {
@@ -1886,16 +1989,18 @@ function Programacion({ activities, saveActivities, currentUser, reprogramacione
       nombre: '',
       unidadMedida: '',
       responsable: '',
-      metaAnualFisica: 0,
+      metaAnualFisica: 0,      // física PIA
+      metaAnualFisicaPIM: 0,   // física PIM
       presupuestoAnual: 0,
       activo: true,
+      genericas: nuevasGenericas(),
       programacion: Array.from({ length: 12 }, () => ({ fisica: 0, financiera: 0 })),
     });
     setShowForm(true);
   }
 
   function editActivity(a) {
-    setEditing(JSON.parse(JSON.stringify(a)));
+    setEditing(JSON.parse(JSON.stringify(migrarActividadGenericas(a))));
     setIsNew(false);
     setShowForm(true);
   }
@@ -1917,14 +2022,26 @@ function Programacion({ activities, saveActivities, currentUser, reprogramacione
       alert('Código AOI y nombre son obligatorios');
       return;
     }
-    const exists = activities.find(x => x.id === editing.id);
-    const next = exists ? activities.map(x => x.id === editing.id ? editing : x) : [...activities, editing];
+    // Sincronizar el campo legado 'programacion' y 'presupuestoAnual' desde las genéricas PIM
+    // (para que Seguimiento, Tableros y Reportes que aún leen 'programacion' funcionen)
+    const finalAct = { ...editing };
+    if (finalAct.genericas) {
+      const prog = Array.from({ length: 12 }, (_, i) => ({
+        fisica: Number(finalAct.programacion?.[i]?.fisica) || 0,
+        financiera: financieroMesActividad(finalAct, 'pim', i),
+      }));
+      finalAct.programacion = prog;
+      finalAct.presupuestoAnual = totalFinancieroActividad(finalAct, 'pim');
+      finalAct.presupuestoAnualPIA = totalFinancieroActividad(finalAct, 'pia');
+    }
+    const exists = activities.find(x => x.id === finalAct.id);
+    const next = exists ? activities.map(x => x.id === finalAct.id ? finalAct : x) : [...activities, finalAct];
     await saveActivities(next);
     if (logAuditoria) {
       await logAuditoria(
         exists ? 'editar_actividad' : 'crear_actividad',
-        `${exists ? 'Editó' : 'Creó'} actividad ${editing.codigoAOI} - ${editing.nombre}`,
-        { actividadId: editing.id, centroCosto: editing.centroCosto }
+        `${exists ? 'Editó' : 'Creó'} actividad ${finalAct.codigoAOI} - ${finalAct.nombre}`,
+        { actividadId: finalAct.id, centroCosto: finalAct.centroCosto }
       );
     }
     setShowForm(false);
@@ -1945,13 +2062,22 @@ function Programacion({ activities, saveActivities, currentUser, reprogramacione
   return (
     <>
       <PageHeader title="Programación POI" subtitle="Actividades operativas"
-        action={canEdit && (
-          <button onClick={newActivity}
-            className="flex items-center gap-2 px-4 py-2.5 rounded-md text-sm font-semibold transition-colors"
-            style={{ background: '#1E2A3A', color: '#F5F1E8' }}>
-            <Plus size={16} /> Nueva actividad
-          </button>
-        )} />
+        action={
+          <div className="flex items-center gap-2">
+            <button onClick={exportarProgramacionExcel}
+              className="flex items-center gap-2 px-4 py-2.5 rounded-md text-sm font-semibold transition-colors"
+              style={{ background: '#1F7A4D', color: '#FFFFFF' }}>
+              <FileSpreadsheet size={16} /> Exportar a Excel
+            </button>
+            {canEdit && (
+              <button onClick={newActivity}
+                className="flex items-center gap-2 px-4 py-2.5 rounded-md text-sm font-semibold transition-colors"
+                style={{ background: '#1E2A3A', color: '#F5F1E8' }}>
+                <Plus size={16} /> Nueva actividad
+              </button>
+            )}
+          </div>
+        } />
 
       <Card className="p-4 mb-4">
         <div className="flex items-center gap-3 flex-wrap">
@@ -2023,6 +2149,38 @@ function Programacion({ activities, saveActivities, currentUser, reprogramacione
         )}
       </Card>
 
+      {/* Selector de mes para ver la programación de un mes específico */}
+      <Card className="p-4 mb-4">
+        <div className="flex items-center gap-2 flex-wrap">
+          <Calendar size={16} style={{ color: '#7A6F5C' }} />
+          <span className="text-xs uppercase tracking-wider font-medium mr-2" style={{ color: '#7A6F5C' }}>Ver mes:</span>
+          <button onClick={() => setFiltroMesProg(0)}
+            className="text-xs px-3 py-1.5 rounded-md font-medium"
+            style={{
+              background: filtroMesProg === 0 ? '#1E2A3A' : '#F0E9D9',
+              color: filtroMesProg === 0 ? '#F5F1E8' : '#1E2A3A',
+            }}>
+            Anual (total)
+          </button>
+          {MESES.map((m, i) => (
+            <button key={i} onClick={() => setFiltroMesProg(i + 1)}
+              className="text-xs px-2.5 py-1.5 rounded-md font-medium"
+              style={{
+                background: filtroMesProg === i + 1 ? '#C9A350' : '#FAF7F0',
+                color: '#1E2A3A',
+                border: filtroMesProg === i + 1 ? '1px solid #C9A350' : '1px solid #E5DDD0',
+              }}>
+              {MESES_ABR[i]}
+            </button>
+          ))}
+          {filtroMesProg > 0 && (
+            <span className="text-xs ml-2 italic" style={{ color: '#9C7A2B' }}>
+              Mostrando programación de <strong>{MESES[filtroMesProg - 1]}</strong>
+            </span>
+          )}
+        </div>
+      </Card>
+
       <Card>
         <div className="overflow-x-auto">
           <table className="w-full text-sm">
@@ -2032,19 +2190,23 @@ function Programacion({ activities, saveActivities, currentUser, reprogramacione
                 <th className="text-left px-4 py-3 text-xs uppercase tracking-wider" style={{ color: '#7A6F5C' }}>AOI</th>
                 <th className="text-left px-4 py-3 text-xs uppercase tracking-wider" style={{ color: '#7A6F5C' }}>Actividad</th>
                 <th className="text-left px-4 py-3 text-xs uppercase tracking-wider" style={{ color: '#7A6F5C' }}>Unidad</th>
-                <th className="text-right px-4 py-3 text-xs uppercase tracking-wider" style={{ color: '#7A6F5C' }}>Física</th>
-                <th className="text-right px-4 py-3 text-xs uppercase tracking-wider" style={{ color: '#7A6F5C' }}>Financiera</th>
+                <th className="text-right px-4 py-3 text-xs uppercase tracking-wider" style={{ color: '#7A6F5C' }}>Física PIA</th>
+                <th className="text-right px-4 py-3 text-xs uppercase tracking-wider" style={{ color: '#7A6F5C' }}>Física PIM</th>
+                <th className="text-right px-4 py-3 text-xs uppercase tracking-wider" style={{ color: '#7A6F5C', background: '#FAF7F0' }}>{filtroMesProg > 0 ? `Fin. PIA ${MESES_ABR[filtroMesProg-1]}` : 'Financiera PIA'}</th>
+                <th className="text-right px-4 py-3 text-xs uppercase tracking-wider" style={{ color: '#9C7A2B', background: '#FBF1D9' }}>{filtroMesProg > 0 ? `Fin. PIM ${MESES_ABR[filtroMesProg-1]}` : 'Financiera PIM'}</th>
                 <th className="px-4 py-3"></th>
               </tr>
             </thead>
             <tbody>
               {filtered.length === 0 && (
-                <tr><td colSpan={7} className="text-center py-12 text-sm" style={{ color: '#7A6F5C' }}>
+                <tr><td colSpan={9} className="text-center py-12 text-sm" style={{ color: '#7A6F5C' }}>
                   Sin actividades en este filtro.
                 </td></tr>
               )}
               {filtered.map((a) => {
                 const inactivo = a.activo === false;
+                const finPIA = filtroMesProg > 0 ? financieroMesActividad(a, 'pia', filtroMesProg - 1) : totalFinancieroActividad(a, 'pia');
+                const finPIM = filtroMesProg > 0 ? financieroMesActividad(a, 'pim', filtroMesProg - 1) : totalFinancieroActividad(a, 'pim');
                 return (
                 <tr key={a.id} className="border-b last:border-b-0 hover:bg-stone-50" style={{ borderColor: '#E5DDD0', opacity: inactivo ? 0.55 : 1 }}>
                   <td className="px-4 py-3">
@@ -2077,8 +2239,10 @@ function Programacion({ activities, saveActivities, currentUser, reprogramacione
                     <div className="text-xs leading-snug" style={{ maxWidth: 380 }}>{a.nombre}</div>
                   </td>
                   <td className="px-4 py-3 text-xs" style={{ color: '#1E2A3A' }}>{a.unidadMedida}</td>
-                  <td className="px-4 py-3 text-right" style={{ color: '#1E2A3A' }}>{a.metaAnualFisica}</td>
-                  <td className="px-4 py-3 text-right font-medium" style={{ color: '#1E2A3A' }}>{fmtMoneyShort(a.presupuestoAnual)}</td>
+                  <td className="px-4 py-3 text-right" style={{ color: '#1E2A3A' }}>{fmtEntero(a.metaAnualFisica)}</td>
+                  <td className="px-4 py-3 text-right" style={{ color: '#1E2A3A' }}>{fmtEntero(a.metaAnualFisicaPIM || a.metaAnualFisica)}</td>
+                  <td className="px-4 py-3 text-right font-medium" style={{ color: '#1E2A3A', background: '#FAF7F0' }}>{fmtEntero(finPIA)}</td>
+                  <td className="px-4 py-3 text-right font-medium" style={{ color: '#9C7A2B', background: '#FBF1D9' }}>{fmtEntero(finPIM)}</td>
                   <td className="px-4 py-3 text-right whitespace-nowrap">
                     {canEdit ? (
                       <>
@@ -2103,6 +2267,18 @@ function Programacion({ activities, saveActivities, currentUser, reprogramacione
                 );
               })}
             </tbody>
+            {filtered.length > 0 && (
+              <tfoot>
+                <tr style={{ background: '#1E2A3A', color: '#F5F1E8', fontWeight: 600 }}>
+                  <td className="px-4 py-3 text-xs uppercase tracking-wider" colSpan={4}>TOTAL PROGRAMADO ({filtered.length} actividades)</td>
+                  <td className="px-4 py-3 text-right text-xs">{fmtEntero(filtered.reduce((s, a) => s + (Number(a.metaAnualFisica) || 0), 0))}</td>
+                  <td className="px-4 py-3 text-right text-xs">{fmtEntero(filtered.reduce((s, a) => s + (Number(a.metaAnualFisicaPIM || a.metaAnualFisica) || 0), 0))}</td>
+                  <td className="px-4 py-3 text-right text-xs">{fmtEntero(filtered.reduce((s, a) => s + (filtroMesProg > 0 ? financieroMesActividad(a, 'pia', filtroMesProg - 1) : totalFinancieroActividad(a, 'pia')), 0))}</td>
+                  <td className="px-4 py-3 text-right text-xs" style={{ color: '#C9A350' }}>{fmtEntero(filtered.reduce((s, a) => s + (filtroMesProg > 0 ? financieroMesActividad(a, 'pim', filtroMesProg - 1) : totalFinancieroActividad(a, 'pim')), 0))}</td>
+                  <td className="px-4 py-3"></td>
+                </tr>
+              </tfoot>
+            )}
           </table>
         </div>
       </Card>
@@ -2139,14 +2315,33 @@ function Programacion({ activities, saveActivities, currentUser, reprogramacione
 }
 
 function ActivityForm({ activity, setActivity, isNew, onSave, onClose, activities = [], areasMap, onAgregarArea, onEliminarArea, canEdit = false }) {
+  // Asegurar estructura de genéricas
+  const act = activity.genericas ? activity : migrarActividadGenericas(activity);
+  if (!activity.genericas) {
+    // Sincronizar una sola vez al abrir
+    setTimeout(() => setActivity(act), 0);
+  }
+
   function update(field, value) { setActivity({ ...activity, [field]: value }); }
-  function updateProg(idx, field, value) {
-    const p = [...activity.programacion];
-    p[idx] = { ...p[idx], [field]: Number(value) || 0 };
+
+  // Actualizar un valor de genérica: gen (código), tipo (pia|pim), mesIdx, valor
+  function updateGenerica(gen, tipo, mesIdx, value) {
+    const genericas = JSON.parse(JSON.stringify(activity.genericas || nuevasGenericas()));
+    if (!genericas[gen]) genericas[gen] = { pia: Array(12).fill(0), pim: Array(12).fill(0) };
+    genericas[gen][tipo][mesIdx] = Number(value) || 0;
+    setActivity({ ...activity, genericas });
+  }
+
+  function updateFisica(idx, value) {
+    const p = [...(activity.programacion || Array.from({ length: 12 }, () => ({ fisica: 0, financiera: 0 })))];
+    p[idx] = { ...p[idx], fisica: Number(value) || 0 };
     setActivity({ ...activity, programacion: p });
   }
-  const sumFis = activity.programacion.reduce((s, m) => s + (Number(m.fisica) || 0), 0);
-  const sumFin = activity.programacion.reduce((s, m) => s + (Number(m.financiera) || 0), 0);
+
+  // Totales por tipo
+  const sumFinPIA = totalFinancieroActividad(activity, 'pia');
+  const sumFinPIM = totalFinancieroActividad(activity, 'pim');
+  const sumFis = (activity.programacion || []).reduce((s, m) => s + (Number(m?.fisica) || 0), 0);
 
   // Mapa efectivo de áreas (dinámico si fue pasado por props)
   const _areasMap = areasMap || AREAS_POR_CC;
@@ -2305,51 +2500,123 @@ function ActivityForm({ activity, setActivity, isNew, onSave, onClose, activitie
               </div>
             )}
           </Field>
-          <Field label="Física anual">
+          <Field label="Física anual PIA">
             <input type="number" value={activity.metaAnualFisica} onChange={(e) => update('metaAnualFisica', Number(e.target.value) || 0)} className={inputCls} />
           </Field>
-          <Field label="Financiera anual (S/)">
-            <input type="number" step="0.01" value={activity.presupuestoAnual} onChange={(e) => update('presupuestoAnual', Number(e.target.value) || 0)} className={inputCls} />
+          <Field label="Física anual PIM">
+            <input type="number" value={activity.metaAnualFisicaPIM ?? activity.metaAnualFisica} onChange={(e) => update('metaAnualFisicaPIM', Number(e.target.value) || 0)} className={inputCls} />
           </Field>
         </div>
 
-        <div className="px-6 pb-2">
-          <div className="text-xs uppercase tracking-widest mb-3" style={{ color: '#9C7A2B' }}>Programación mensual</div>
+        {/* Resumen de totales financieros (calculados de las genéricas) */}
+        <div className="px-6 pb-2 grid grid-cols-2 gap-4">
+          <div className="p-3 rounded" style={{ background: '#FAF7F0', border: '1px solid #E5DDD0' }}>
+            <div className="text-[10px] uppercase tracking-wider" style={{ color: '#7A6F5C' }}>Financiera anual PIA</div>
+            <div className="text-lg font-bold" style={{ color: '#1E2A3A' }}>S/ {fmtDecimal(sumFinPIA)}</div>
+          </div>
+          <div className="p-3 rounded" style={{ background: '#FBF1D9', border: '1px solid #C9A350' }}>
+            <div className="text-[10px] uppercase tracking-wider" style={{ color: '#9C7A2B' }}>Financiera anual PIM</div>
+            <div className="text-lg font-bold" style={{ color: '#9C7A2B' }}>S/ {fmtDecimal(sumFinPIM)}</div>
+          </div>
         </div>
 
+        {/* Programación física mensual */}
+        <div className="px-6 pb-2">
+          <div className="text-xs uppercase tracking-widest mb-3" style={{ color: '#9C7A2B' }}>Programación física mensual</div>
+        </div>
         <div className="px-6 pb-4">
           <div className="overflow-x-auto rounded-md border" style={{ borderColor: '#E5DDD0' }}>
             <table className="w-full text-sm">
               <thead>
                 <tr style={{ background: '#F0E9D9' }}>
-                  <th className="text-left px-3 py-2 text-xs uppercase" style={{ color: '#7A6F5C' }}>Mes</th>
-                  <th className="text-right px-3 py-2 text-xs uppercase" style={{ color: '#7A6F5C' }}>Físico prog.</th>
-                  <th className="text-right px-3 py-2 text-xs uppercase" style={{ color: '#7A6F5C' }}>Financiero prog. (S/)</th>
+                  {MESES_ABR.map((m, i) => (
+                    <th key={i} className="text-center px-2 py-2 text-[10px] uppercase" style={{ color: '#7A6F5C' }}>{m}</th>
+                  ))}
+                  <th className="text-center px-2 py-2 text-[10px] uppercase" style={{ color: '#1E2A3A', background: '#E5DDD0' }}>Total</th>
                 </tr>
               </thead>
               <tbody>
-                {MESES.map((m, i) => (
-                  <tr key={i} className="border-t" style={{ borderColor: '#E5DDD0' }}>
-                    <td className="px-3 py-1.5 text-xs" style={{ color: '#1E2A3A' }}>{m}</td>
-                    <td className="px-3 py-1.5">
-                      <input type="number" value={activity.programacion[i].fisica}
-                        onChange={(e) => updateProg(i, 'fisica', e.target.value)}
-                        className="w-full text-right px-2 py-1 rounded border text-sm" style={{ borderColor: '#E5DDD0' }} />
+                <tr>
+                  {MESES.map((m, i) => (
+                    <td key={i} className="px-1 py-1.5">
+                      <input type="number" value={activity.programacion?.[i]?.fisica ?? 0}
+                        onChange={(e) => updateFisica(i, e.target.value)}
+                        className="w-full text-right px-1 py-1 rounded border text-xs" style={{ borderColor: '#E5DDD0' }} />
                     </td>
-                    <td className="px-3 py-1.5">
-                      <input type="number" step="0.01" value={activity.programacion[i].financiera}
-                        onChange={(e) => updateProg(i, 'financiera', e.target.value)}
-                        className="w-full text-right px-2 py-1 rounded border text-sm" style={{ borderColor: '#E5DDD0' }} />
-                    </td>
-                  </tr>
-                ))}
-                <tr style={{ background: '#F0E9D9' }}>
-                  <td className="px-3 py-2 text-xs font-semibold" style={{ color: '#1E2A3A' }}>Total programado</td>
-                  <td className="px-3 py-2 text-right text-sm font-semibold" style={{ color: '#1E2A3A' }}>{sumFis}</td>
-                  <td className="px-3 py-2 text-right text-sm font-semibold" style={{ color: '#1E2A3A' }}>{fmtMoney(sumFin)}</td>
+                  ))}
+                  <td className="px-2 py-1.5 text-right text-xs font-bold" style={{ color: '#1E2A3A', background: '#FAF7F0' }}>{fmtEntero(sumFis)}</td>
                 </tr>
               </tbody>
             </table>
+          </div>
+        </div>
+
+        {/* Programación financiera por genérica de gasto */}
+        <div className="px-6 pb-2">
+          <div className="text-xs uppercase tracking-widest mb-1" style={{ color: '#9C7A2B' }}>Programación financiera por genérica de gasto</div>
+          <div className="text-[11px] mb-3" style={{ color: '#7A6F5C' }}>Ingresa los importes con decimales. Cada genérica tiene su columna PIA (original) y PIM (modificable).</div>
+        </div>
+        <div className="px-6 pb-4 space-y-4">
+          {GENERICAS_GASTO.map(gen => {
+            const totPIA = (activity.genericas?.[gen.codigo]?.pia || []).reduce((s, v) => s + (Number(v) || 0), 0);
+            const totPIM = (activity.genericas?.[gen.codigo]?.pim || []).reduce((s, v) => s + (Number(v) || 0), 0);
+            return (
+              <div key={gen.codigo} className="rounded-md border" style={{ borderColor: '#E5DDD0' }}>
+                <div className="px-3 py-2 flex items-center justify-between" style={{ background: '#1E2A3A' }}>
+                  <span className="text-xs font-semibold" style={{ color: '#C9A350' }}>{gen.codigo} {gen.nombre}</span>
+                  <span className="text-[11px]" style={{ color: '#F5F1E8' }}>
+                    PIA: S/ {fmtDecimal(totPIA)} &nbsp;|&nbsp; PIM: S/ {fmtDecimal(totPIM)}
+                  </span>
+                </div>
+                <div className="overflow-x-auto">
+                  <table className="w-full text-xs">
+                    <thead>
+                      <tr style={{ background: '#F0E9D9' }}>
+                        <th className="text-left px-2 py-1.5 text-[10px] uppercase" style={{ color: '#7A6F5C' }}>Tipo</th>
+                        {MESES_ABR.map((m, i) => <th key={i} className="text-center px-1 py-1.5 text-[10px]" style={{ color: '#7A6F5C' }}>{m}</th>)}
+                        <th className="text-center px-2 py-1.5 text-[10px] uppercase" style={{ color: '#1E2A3A', background: '#E5DDD0' }}>Total</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      <tr>
+                        <td className="px-2 py-1 text-[11px] font-semibold" style={{ color: '#7A6F5C' }}>PIA</td>
+                        {MESES.map((m, i) => (
+                          <td key={i} className="px-0.5 py-1">
+                            <input type="number" step="0.01" value={activity.genericas?.[gen.codigo]?.pia?.[i] ?? 0}
+                              onChange={(e) => updateGenerica(gen.codigo, 'pia', i, e.target.value)}
+                              className="w-full text-right px-1 py-1 rounded border text-[11px]" style={{ borderColor: '#E5DDD0' }} />
+                          </td>
+                        ))}
+                        <td className="px-2 py-1 text-right text-[11px] font-bold" style={{ color: '#1E2A3A', background: '#FAF7F0' }}>{fmtEntero(totPIA)}</td>
+                      </tr>
+                      <tr>
+                        <td className="px-2 py-1 text-[11px] font-semibold" style={{ color: '#9C7A2B' }}>PIM</td>
+                        {MESES.map((m, i) => (
+                          <td key={i} className="px-0.5 py-1">
+                            <input type="number" step="0.01" value={activity.genericas?.[gen.codigo]?.pim?.[i] ?? 0}
+                              onChange={(e) => updateGenerica(gen.codigo, 'pim', i, e.target.value)}
+                              className="w-full text-right px-1 py-1 rounded border text-[11px]" style={{ borderColor: '#C9A350', background: '#FFFDF7' }} />
+                          </td>
+                        ))}
+                        <td className="px-2 py-1 text-right text-[11px] font-bold" style={{ color: '#9C7A2B', background: '#FBF1D9' }}>{fmtEntero(totPIM)}</td>
+                      </tr>
+                    </tbody>
+                  </table>
+                </div>
+              </div>
+            );
+          })}
+
+          {/* Totales generales */}
+          <div className="grid grid-cols-2 gap-4">
+            <div className="p-3 rounded flex items-center justify-between" style={{ background: '#1E2A3A' }}>
+              <span className="text-xs uppercase tracking-wider" style={{ color: '#7A6F5C' }}>Total PIA</span>
+              <strong style={{ color: '#F5F1E8', fontSize: 15 }}>S/ {fmtDecimal(sumFinPIA)}</strong>
+            </div>
+            <div className="p-3 rounded flex items-center justify-between" style={{ background: '#9C7A2B' }}>
+              <span className="text-xs uppercase tracking-wider" style={{ color: '#FBF1D9' }}>Total PIM</span>
+              <strong style={{ color: '#FFFFFF', fontSize: 15 }}>S/ {fmtDecimal(sumFinPIM)}</strong>
+            </div>
           </div>
         </div>
 
