@@ -1,11 +1,12 @@
 import React, { useState, useEffect, useMemo } from 'react';
+import * as XLSX from 'xlsx';
 import {
   LayoutDashboard, ListChecks, ClipboardEdit, FileText, Plus, Trash2,
   Save, X, TrendingUp, Wallet, Target, AlertCircle, CheckCircle2,
   Calendar, Briefcase, Loader2, Edit3, Building2, Filter, Download,
   CalendarClock, MailOpen, Lock, Unlock, Send, Check, Clock, XCircle,
   User, LogOut, Shield, Eye, EyeOff, RefreshCw, FileSpreadsheet, Printer,
-  Bell, History, Activity
+  Bell, History, Activity, Upload
 } from 'lucide-react';
 import {
   BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, Legend,
@@ -604,6 +605,8 @@ export default function App() {
             <Programacion
               activities={activities}
               saveActivities={saveActivities}
+              progress={progress}
+              saveProgress={saveProgress}
               currentUser={currentUser}
               reprogramaciones={reprogramaciones}
               areasPorCC={areasPorCC}
@@ -1907,9 +1910,306 @@ function CentrosCosto({ activities, progress, modifs, currentUser }) {
 }
 
 /* ============================================================
+   IMPORTACIÓN EXCEL — lógica de procesamiento
+============================================================ */
+async function procesarImportacion(archivos, activities, progress, year, saveActivities, saveProgress) {
+  const resultados = { actualizados: 0, noEncontrados: [], errores: [] };
+
+  // Clonar para no mutar el estado directamente durante el proceso
+  const acts = activities.map(a => ({ ...a }));
+  const progs = [...progress];
+
+  // --- ARCHIVO FÍSICO ---
+  if (archivos.fisica) {
+    try {
+      const wb = XLSX.read(archivos.fisica, { type: 'array' });
+      const ws = wb.Sheets[wb.SheetNames[0]];
+      const rows = XLSX.utils.sheet_to_json(ws, { header: 1 });
+      for (let i = 2; i < rows.length; i++) {
+        const row = rows[i];
+        if (!row || !row[7]) continue;
+        const aoiCode = String(row[7]).trim();
+        const act = acts.find(a => a.codigoAOI === aoiCode);
+        if (!act) { if (!resultados.noEncontrados.includes(aoiCode)) resultados.noEncontrados.push(aoiCode); continue; }
+
+        const pimFis = Array.from({ length: 12 }, (_, m) => Number(row[26 + m]) || 0);
+        const ejecFis = Array.from({ length: 12 }, (_, m) => {
+          const v = row[39 + m];
+          return (v !== null && v !== undefined && !isNaN(Number(v))) ? Number(v) : null;
+        });
+
+        act.programacion = act.programacion || Array.from({ length: 12 }, () => ({ fisica: 0, financiera: 0 }));
+        pimFis.forEach((v, m) => { act.programacion[m].fisica = v; });
+
+        if (!act.fisicaMensual) act.fisicaMensual = { pia: Array(12).fill(0), pim: Array(12).fill(0) };
+        act.fisicaMensual.pim = pimFis;
+        act.metaAnualFisicaPIM = pimFis.reduce((s, v) => s + v, 0);
+
+        ejecFis.forEach((v, m) => {
+          if (v === null) return;
+          const mes = m + 1;
+          const existing = progs.find(p => p.actividadId === act.id && p.anio === year && p.mes === mes);
+          if (existing) {
+            existing.avanceFisico = v;
+          } else if (v > 0) {
+            progs.push({ id: Math.random().toString(36).slice(2, 10), actividadId: act.id, anio: year, mes, avanceFisico: v, avanceFinanciero: 0, logros: '', limitaciones: '', medidas: '', fechaRegistro: new Date().toISOString() });
+          }
+        });
+        resultados.actualizados++;
+      }
+    } catch (e) {
+      resultados.errores.push('Error al procesar archivo físico: ' + e.message);
+    }
+  }
+
+  // --- ARCHIVO FINANCIERO (programación) ---
+  if (archivos.finProg) {
+    try {
+      const wb = XLSX.read(archivos.finProg, { type: 'array' });
+      const ws = wb.Sheets[wb.SheetNames[0]];
+      const rows = XLSX.utils.sheet_to_json(ws, { header: 1 });
+
+      const byAOI = {};
+      for (let i = 2; i < rows.length; i++) {
+        const row = rows[i];
+        if (!row || !row[7]) continue;
+        const aoiCode = String(row[7]).trim();
+        if (!byAOI[aoiCode]) byAOI[aoiCode] = Array(12).fill(0);
+        for (let m = 0; m < 12; m++) {
+          byAOI[aoiCode][m] += Number(row[35 + m]) || 0;
+        }
+      }
+
+      for (const [aoiCode, pimFin] of Object.entries(byAOI)) {
+        const act = acts.find(a => a.codigoAOI === aoiCode);
+        if (!act) continue;
+        act.programacion = act.programacion || Array.from({ length: 12 }, () => ({ fisica: 0, financiera: 0 }));
+        pimFin.forEach((v, m) => { act.programacion[m].financiera = v; });
+        act.presupuestoAnual = pimFin.reduce((s, v) => s + v, 0);
+      }
+    } catch (e) {
+      resultados.errores.push('Error al procesar archivo financiero (programación): ' + e.message);
+    }
+  }
+
+  // --- ARCHIVO EJECUCIÓN FINANCIERA ---
+  if (archivos.finEjec) {
+    try {
+      const wb = XLSX.read(archivos.finEjec, { type: 'array' });
+      const ws = wb.Sheets[wb.SheetNames[0]];
+      const rows = XLSX.utils.sheet_to_json(ws, { header: 1 });
+
+      const byAOI = {};
+      for (let i = 2; i < rows.length; i++) {
+        const row = rows[i];
+        if (!row || !row[3] || String(row[3]).startsWith('Total')) continue;
+        const aoiCode = String(row[3]).trim();
+        if (!aoiCode.startsWith('AOI')) continue;
+        if (!byAOI[aoiCode]) byAOI[aoiCode] = Array(12).fill(0);
+        for (let m = 0; m < 12; m++) {
+          byAOI[aoiCode][m] += Number(row[8 + m]) || 0;
+        }
+      }
+
+      for (const [aoiCode, ejecFin] of Object.entries(byAOI)) {
+        const act = acts.find(a => a.codigoAOI === aoiCode);
+        if (!act) continue;
+        ejecFin.forEach((v, m) => {
+          if (v === 0) return;
+          const mes = m + 1;
+          const existing = progs.find(p => p.actividadId === act.id && p.anio === year && p.mes === mes);
+          if (existing) {
+            existing.avanceFinanciero = v;
+          } else {
+            progs.push({ id: Math.random().toString(36).slice(2, 10), actividadId: act.id, anio: year, mes, avanceFisico: 0, avanceFinanciero: v, logros: '', limitaciones: '', medidas: '', fechaRegistro: new Date().toISOString() });
+          }
+        });
+      }
+    } catch (e) {
+      resultados.errores.push('Error al procesar archivo de ejecución financiera: ' + e.message);
+    }
+  }
+
+  await saveActivities(acts);
+  await saveProgress(progs);
+  return resultados;
+}
+
+/* ============================================================
+   MODAL DE IMPORTACIÓN EXCEL
+============================================================ */
+function ModalImportExcel({ onClose, activities, progress, saveActivities, saveProgress }) {
+  const ANIO_IMPORTACION = 2026;
+  const [archivosData, setArchivosData] = useState({ fisica: null, finProg: null, finEjec: null });
+  const [archivosNombre, setArchivosNombre] = useState({ fisica: '', finProg: '', finEjec: '' });
+  const [archivosEstado, setArchivosEstado] = useState({ fisica: 'pendiente', finProg: 'pendiente', finEjec: 'pendiente' });
+  const [procesando, setProcesando] = useState(false);
+  const [resultado, setResultado] = useState(null);
+
+  const hayAlMenosUno = archivosData.fisica || archivosData.finProg || archivosData.finEjec;
+
+  function leerArchivo(key, file) {
+    if (!file) return;
+    const reader = new FileReader();
+    reader.onload = (e) => {
+      const data = new Uint8Array(e.target.result);
+      setArchivosData(prev => ({ ...prev, [key]: data }));
+      setArchivosNombre(prev => ({ ...prev, [key]: file.name }));
+      setArchivosEstado(prev => ({ ...prev, [key]: 'cargado' }));
+    };
+    reader.onerror = () => {
+      setArchivosEstado(prev => ({ ...prev, [key]: 'error' }));
+    };
+    reader.readAsArrayBuffer(file);
+  }
+
+  async function handleProcesar() {
+    if (!hayAlMenosUno) return;
+    setProcesando(true);
+    setResultado(null);
+    try {
+      const res = await procesarImportacion(archivosData, activities, progress, ANIO_IMPORTACION, saveActivities, saveProgress);
+      setResultado(res);
+    } catch (e) {
+      setResultado({ actualizados: 0, noEncontrados: [], errores: ['Error inesperado: ' + e.message] });
+    }
+    setProcesando(false);
+  }
+
+  const secciones = [
+    {
+      key: 'fisica',
+      titulo: 'Programación y Ejecución Física',
+      archivo: 'PROGRAMACIÓN Y EJECUCIÓN META FISICA.xlsx',
+      descripcion: 'Actualiza la programación física PIM mensual y la ejecución física por actividad operativa.',
+    },
+    {
+      key: 'finProg',
+      titulo: 'Programación Financiera',
+      archivo: 'PROGRAMACIÓN FINANCIERA.xlsx',
+      descripcion: 'Actualiza la programación financiera PIM mensual (suma por AOI, múltiples genéricas).',
+    },
+    {
+      key: 'finEjec',
+      titulo: 'Ejecución Financiera',
+      archivo: 'EJECUCIÓN FINANCIERA POI.xlsx',
+      descripcion: 'Actualiza la ejecución financiera mensual devengada (suma por AOI).',
+    },
+  ];
+
+  function estadoColor(estado) {
+    if (estado === 'cargado') return { bg: '#D1FAE5', color: '#065F46', label: 'Cargado' };
+    if (estado === 'error') return { bg: '#FEE2E2', color: '#B91C1C', label: 'Error al leer' };
+    return { bg: '#F0E9D9', color: '#7A6F5C', label: 'Pendiente' };
+  }
+
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center" style={{ background: 'rgba(30,42,58,0.55)' }}>
+      <div className="rounded-xl shadow-2xl w-full max-w-xl mx-4 overflow-hidden" style={{ background: '#FFFFFF', border: '1px solid #E5DDD0' }}>
+        {/* Header */}
+        <div className="flex items-center justify-between px-6 py-4" style={{ background: '#1E2A3A' }}>
+          <div className="flex items-center gap-3">
+            <Upload size={20} style={{ color: '#C9A350' }} />
+            <span style={{ fontFamily: "'Fraunces', serif", fontSize: 18, fontWeight: 500, color: '#F5F1E8' }}>
+              Importar datos desde Excel
+            </span>
+          </div>
+          <button onClick={onClose} style={{ color: '#9BADB8' }} className="hover:text-white transition-colors">
+            <X size={20} />
+          </button>
+        </div>
+
+        {/* Body */}
+        <div className="px-6 py-5 space-y-4" style={{ maxHeight: '70vh', overflowY: 'auto' }}>
+          <p className="text-xs" style={{ color: '#7A6F5C' }}>
+            Selecciona uno o más archivos Excel para importar datos al sistema. Los datos se actualizan para el año <strong>{ANIO_IMPORTACION}</strong>.
+          </p>
+
+          {secciones.map(sec => {
+            const est = archivosEstado[sec.key];
+            const cfg = estadoColor(est);
+            return (
+              <div key={sec.key} className="rounded-lg p-4" style={{ border: '1px solid #E5DDD0', background: '#FAF7F0' }}>
+                <div className="flex items-start gap-3">
+                  <FileSpreadsheet size={20} style={{ color: '#1F7A4D', marginTop: 2, flexShrink: 0 }} />
+                  <div className="flex-1 min-w-0">
+                    <div className="flex items-center gap-2 flex-wrap">
+                      <span className="text-sm font-semibold" style={{ color: '#1E2A3A' }}>{sec.titulo}</span>
+                      <span className="text-xs px-2 py-0.5 rounded-full font-medium" style={{ background: cfg.bg, color: cfg.color }}>
+                        {cfg.label}
+                      </span>
+                    </div>
+                    <div className="text-xs mt-1 mb-2" style={{ color: '#7A6F5C' }}>
+                      {sec.descripcion}
+                    </div>
+                    <div className="text-xs font-mono mb-2" style={{ color: '#9C7A2B' }}>{sec.archivo}</div>
+                    {archivosNombre[sec.key] && (
+                      <div className="text-xs mb-2" style={{ color: '#065F46' }}>
+                        Archivo: {archivosNombre[sec.key]}
+                      </div>
+                    )}
+                    <label className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-md text-xs font-semibold cursor-pointer transition-colors"
+                      style={{ background: '#1E2A3A', color: '#F5F1E8' }}>
+                      <Upload size={12} />
+                      {archivosNombre[sec.key] ? 'Cambiar archivo' : 'Seleccionar archivo'}
+                      <input type="file" accept=".xlsx" className="hidden"
+                        onChange={(e) => leerArchivo(sec.key, e.target.files[0])} />
+                    </label>
+                  </div>
+                </div>
+              </div>
+            );
+          })}
+
+          {/* Resultado */}
+          {resultado && (
+            <div className="rounded-lg p-4" style={{ border: '1px solid #A7F3D0', background: '#D1FAE5' }}>
+              <div className="flex items-center gap-2 mb-2">
+                <CheckCircle2 size={16} style={{ color: '#065F46' }} />
+                <span className="text-sm font-semibold" style={{ color: '#065F46' }}>Importación completada</span>
+              </div>
+              <div className="text-xs space-y-1" style={{ color: '#065F46' }}>
+                <div>Actividades actualizadas: <strong>{resultado.actualizados}</strong></div>
+                {resultado.noEncontrados.length > 0 && (
+                  <div style={{ color: '#92400E' }}>
+                    No encontrados ({resultado.noEncontrados.length}): {resultado.noEncontrados.slice(0, 5).join(', ')}{resultado.noEncontrados.length > 5 ? '...' : ''}
+                  </div>
+                )}
+                {resultado.errores.length > 0 && (
+                  <div style={{ color: '#B91C1C' }}>
+                    Errores: {resultado.errores.join('; ')}
+                  </div>
+                )}
+              </div>
+            </div>
+          )}
+        </div>
+
+        {/* Footer */}
+        <div className="flex items-center justify-end gap-3 px-6 py-4" style={{ borderTop: '1px solid #E5DDD0' }}>
+          <button onClick={onClose}
+            className="px-4 py-2 rounded-md text-sm font-semibold transition-colors"
+            style={{ background: '#F0E9D9', color: '#1E2A3A' }}>
+            {resultado ? 'Cerrar' : 'Cancelar'}
+          </button>
+          {!resultado && (
+            <button onClick={handleProcesar} disabled={!hayAlMenosUno || procesando}
+              className="flex items-center gap-2 px-4 py-2 rounded-md text-sm font-semibold transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+              style={{ background: '#C9A350', color: '#1E2A3A' }}>
+              {procesando ? <Loader2 size={14} className="animate-spin" /> : <Upload size={14} />}
+              {procesando ? 'Procesando...' : 'Procesar importación'}
+            </button>
+          )}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+/* ============================================================
    PROGRAMACIÓN POI
 ============================================================ */
-function Programacion({ activities, saveActivities, currentUser, reprogramaciones = [], areasPorCC, saveAreasPorCC, logAuditoria }) {
+function Programacion({ activities, saveActivities, progress, saveProgress, currentUser, reprogramaciones = [], areasPorCC, saveAreasPorCC, logAuditoria }) {
   const ccDisponibles = ccsVisibles(currentUser);
   const [editing, setEditing] = useState(null);
   const [showForm, setShowForm] = useState(false);
@@ -1919,6 +2219,7 @@ function Programacion({ activities, saveActivities, currentUser, reprogramacione
   const [filtroMesProg, setFiltroMesProg] = useState(0); // 0 = año completo; 1-12 = ver columna de ese mes
   const [verHistorial, setVerHistorial] = useState(null);
   const [showGestionAreas, setShowGestionAreas] = useState(false);
+  const [showImportModal, setShowImportModal] = useState(false);
 
   // Usar areasPorCC dinámico si fue pasado por props; fallback al estático
   const areasMap = areasPorCC || AREAS_POR_CC;
@@ -2143,6 +2444,13 @@ function Programacion({ activities, saveActivities, currentUser, reprogramacione
               style={{ background: '#1F7A4D', color: '#FFFFFF' }}>
               <FileSpreadsheet size={16} /> Exportar a Excel
             </button>
+            {canEdit && (
+              <button onClick={() => setShowImportModal(true)}
+                className="flex items-center gap-2 px-4 py-2.5 rounded-md text-sm font-semibold transition-colors"
+                style={{ background: '#C9A350', color: '#1E2A3A' }}>
+                <Upload size={16} /> Importar Excel
+              </button>
+            )}
             {canEdit && (
               <button onClick={newActivity}
                 className="flex items-center gap-2 px-4 py-2.5 rounded-md text-sm font-semibold transition-colors"
@@ -2382,6 +2690,16 @@ function Programacion({ activities, saveActivities, currentUser, reprogramacione
           onAgregarArea={handleAgregarArea}
           onEliminarArea={handleEliminarArea}
           onClose={() => setShowGestionAreas(false)}
+        />
+      )}
+
+      {showImportModal && (
+        <ModalImportExcel
+          onClose={() => setShowImportModal(false)}
+          activities={activities}
+          progress={progress}
+          saveActivities={saveActivities}
+          saveProgress={saveProgress}
         />
       )}
     </>
