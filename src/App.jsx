@@ -2048,6 +2048,7 @@ function Programacion({ activities, saveActivities, currentUser, reprogramacione
       codigoRegistro: '',
       codigoAOI: '',
       nombre: '',
+      descripcion: '',
       unidadMedida: '',
       responsable: '',
       metaAnualFisica: 0,      // física PIA (auto-calculada)
@@ -2055,6 +2056,7 @@ function Programacion({ activities, saveActivities, currentUser, reprogramacione
       presupuestoAnual: 0,
       activo: true,
       piaBloqueado: false,     // nueva actividad: PIA abierto para registro inicial
+      fuentesFinanciamiento: [],
       genericas: nuevasGenericas(),
       fisicaMensual: nuevaFisicaMensual(),
       programacion: Array.from({ length: 12 }, () => ({ fisica: 0, financiera: 0 })),
@@ -2549,6 +2551,9 @@ function ActivityForm({ activity, setActivity, isNew, onSave, onClose, activitie
           <Field label="Nombre de la actividad" full>
             <textarea rows={2} value={activity.nombre} onChange={(e) => update('nombre', e.target.value)} className={inputCls} />
           </Field>
+          <Field label="Descripción de la actividad" full>
+            <textarea rows={3} value={activity.descripcion || ''} onChange={(e) => update('descripcion', e.target.value)} className={inputCls} placeholder="Descripción detallada de la actividad operativa..." />
+          </Field>
           <Field label="Unidad de medida">
             <input type="text" value={activity.unidadMedida} onChange={(e) => update('unidadMedida', e.target.value)} className={inputCls} />
           </Field>
@@ -2635,6 +2640,55 @@ function ActivityForm({ activity, setActivity, isNew, onSave, onClose, activitie
             <div className="text-[10px] uppercase tracking-wider" style={{ color: '#9C7A2B' }}>Financiera anual PIM (auto)</div>
             <div className="text-lg font-bold" style={{ color: '#9C7A2B' }}>S/ {fmtDecimal(sumFinPIM)}</div>
           </div>
+        </div>
+
+        {/* Fuentes de Financiamiento */}
+        <div className="px-6 pb-4">
+          <Field label="Fuentes de Financiamiento" full>
+            <div className="space-y-2">
+              {(activity.fuentesFinanciamiento || []).map((fte, idx) => (
+                <div key={idx} className="flex gap-2 items-center">
+                  <select
+                    value={fte.codigo}
+                    onChange={(e) => {
+                      const opciones = {'00': 'Recursos Ordinarios', '13': 'Donaciones y Transferencias', '09': 'Recursos Directamente Recaudados'};
+                      const nuevas = [...(activity.fuentesFinanciamiento || [])];
+                      nuevas[idx] = { ...nuevas[idx], codigo: e.target.value, nombre: opciones[e.target.value] || nuevas[idx].nombre };
+                      update('fuentesFinanciamiento', nuevas);
+                    }}
+                    className={inputCls} style={{ width: 220 }}>
+                    <option value="00">00. Recursos Ordinarios (RO)</option>
+                    <option value="13">13. Donaciones y Transferencias (DyT)</option>
+                    <option value="09">09. Recursos Directamente Recaudados (RDR)</option>
+                    <option value="otro">Otro...</option>
+                  </select>
+                  {fte.codigo === 'otro' && (
+                    <input type="text" value={fte.nombre} onChange={(e) => {
+                      const nuevas = [...(activity.fuentesFinanciamiento || [])];
+                      nuevas[idx] = { ...nuevas[idx], nombre: e.target.value };
+                      update('fuentesFinanciamiento', nuevas);
+                    }} placeholder="Nombre de la fuente" className={inputCls} style={{ flex: 1 }} />
+                  )}
+                  <input type="number" value={fte.monto || 0}
+                    onChange={(e) => {
+                      const nuevas = [...(activity.fuentesFinanciamiento || [])];
+                      nuevas[idx] = { ...nuevas[idx], monto: Number(e.target.value) };
+                      update('fuentesFinanciamiento', nuevas);
+                    }}
+                    placeholder="Monto S/" className={inputCls} style={{ width: 140 }} />
+                  <button type="button"
+                    onClick={() => { const nuevas = (activity.fuentesFinanciamiento || []).filter((_, i) => i !== idx); update('fuentesFinanciamiento', nuevas); }}
+                    className="p-1 rounded" style={{ color: '#C0392B' }}>✕</button>
+                </div>
+              ))}
+              <button type="button"
+                onClick={() => update('fuentesFinanciamiento', [...(activity.fuentesFinanciamiento || []), { codigo: '00', nombre: 'Recursos Ordinarios', monto: 0 }])}
+                className="text-xs px-3 py-1.5 rounded-md font-semibold"
+                style={{ background: '#E8F2EC', color: '#2D7A4E' }}>
+                + Agregar fuente de financiamiento
+              </button>
+            </div>
+          </Field>
         </div>
 
         {/* Programación física mensual PIA y PIM */}
@@ -3070,6 +3124,177 @@ function Seguimiento({ activities, progress, saveProgress, periodos, solicitudes
     if (logAuditoria) logAuditoria('exportar_seguimiento', `Exportó el seguimiento POI ${year} a Excel`, {});
   }
 
+  // Exportar el seguimiento a PDF (reporte estilo CEPLAN)
+  function exportarSeguimientoPDF() {
+    const actsExport = esResponsableCC(currentUser)
+      ? filtrarActividadesUsuario(activities, currentUser)
+      : activities;
+
+    const MESES_ABR_PDF = ['Ene','Feb','Mar','Abr','May','Jun','Jul','Ago','Sep','Oct','Nov','Dic'];
+
+    // Agrupar por CC
+    const ccsUsados = Array.from(new Set(actsExport.map(a => a.centroCosto)));
+
+    let bodyHtml = '';
+
+    ccsUsados.forEach(cc => {
+      const ccObj = CENTROS_COSTO.find(c => c.nombre === cc) || { codigo: '', nombre: cc };
+      const actsCC = actsExport.filter(a => a.centroCosto === cc);
+
+      bodyHtml += `
+        <div style="page-break-before: auto; margin-bottom: 32px;">
+          <div style="background:#1E2A3A; color:#F5F1E8; padding:10px 16px; font-size:13px; font-weight:bold; margin-bottom:4px;">
+            CC: ${ccObj.codigo} — ${cc}
+          </div>
+          <table style="width:100%; border-collapse:collapse; font-size:10px;">
+            <thead>
+              <tr style="background:#2D4A6B; color:#FFFFFF;">
+                <th style="border:1px solid #ccc; padding:4px 6px; white-space:nowrap;">CÓDIGO</th>
+                <th style="border:1px solid #ccc; padding:4px 6px;">ACTIVIDAD OPERATIVA</th>
+                <th style="border:1px solid #ccc; padding:4px 6px; white-space:nowrap;">U. MEDIDA</th>
+                <th style="border:1px solid #ccc; padding:4px 6px; white-space:nowrap;">PROG./EJE.</th>
+                ${MESES_ABR_PDF.map(m => `<th style="border:1px solid #ccc; padding:4px 3px; text-align:center;">${m}</th>`).join('')}
+                <th style="border:1px solid #ccc; padding:4px 6px; text-align:center; white-space:nowrap;">ACUM.</th>
+                <th style="border:1px solid #ccc; padding:4px 6px; text-align:center; white-space:nowrap;">% ACUM.</th>
+              </tr>
+            </thead>
+            <tbody>
+      `;
+
+      actsCC.forEach(a => {
+        // Calcular acumulados
+        const progMeses = Array.from({length:12}, (_, i) => Number(a.programacion?.[i]?.fisica) || 0);
+        const ejecMeses = Array.from({length:12}, (_, i) => {
+          const reg = progress.find(p => p.actividadId === a.id && p.anio === year && p.mes === i + 1);
+          return reg ? Number(reg.avanceFisico) || 0 : 0;
+        });
+        const acumProg = progMeses.reduce((s, v) => s + v, 0);
+        const acumEjec = ejecMeses.reduce((s, v) => s + v, 0);
+        const pct = acumProg > 0 ? ((acumEjec / acumProg) * 100).toFixed(1) : '—';
+        const pctNum = acumProg > 0 ? (acumEjec / acumProg) * 100 : 0;
+        const pctColor = acumProg === 0 ? '#FFFFFF' : pctNum >= 95 ? '#C8E6C9' : pctNum >= 75 ? '#FFF9C4' : '#FFCDD2';
+
+        bodyHtml += `
+          <tr style="background:#F8F5F0;">
+            <td rowspan="2" style="border:1px solid #ccc; padding:4px 6px; font-family:monospace; font-size:9px; white-space:nowrap; vertical-align:middle;">${a.codigoAOI}</td>
+            <td rowspan="2" style="border:1px solid #ccc; padding:4px 6px; vertical-align:middle; max-width:260px;">${a.nombre}</td>
+            <td rowspan="2" style="border:1px solid #ccc; padding:4px 6px; text-align:center; vertical-align:middle; white-space:nowrap;">${a.unidadMedida || ''}</td>
+            <td style="border:1px solid #ccc; padding:3px 6px; font-size:9px; font-weight:bold; color:#1E2A3A; background:#EEE8D8;">PROGRAMADO</td>
+            ${progMeses.map(v => `<td style="border:1px solid #ccc; padding:3px 4px; text-align:right;">${v || ''}</td>`).join('')}
+            <td rowspan="2" style="border:1px solid #ccc; padding:4px 6px; text-align:center; vertical-align:middle; font-weight:bold;">${acumProg}</td>
+            <td rowspan="2" style="border:1px solid #ccc; padding:4px 6px; text-align:center; vertical-align:middle; font-weight:bold; background:${pctColor};">${acumProg === 0 ? '—' : pct + '%'}</td>
+          </tr>
+          <tr>
+            <td style="border:1px solid #ccc; padding:3px 6px; font-size:9px; font-weight:bold; color:#2D7A4E; background:#E8F2EC;">EJECUTADO</td>
+            ${ejecMeses.map(v => `<td style="border:1px solid #ccc; padding:3px 4px; text-align:right; color:#2D7A4E;">${v || ''}</td>`).join('')}
+          </tr>
+        `;
+      });
+
+      bodyHtml += `</tbody></table></div>`;
+    });
+
+    // Resumen general
+    const totalActs = actsExport.length;
+    let countVerde = 0, countAmarillo = 0, countRojo = 0;
+    actsExport.forEach(a => {
+      const acumProg = Array.from({length:12}, (_, i) => Number(a.programacion?.[i]?.fisica) || 0).reduce((s,v)=>s+v,0);
+      const acumEjec = Array.from({length:12}, (_, i) => {
+        const reg = progress.find(p => p.actividadId === a.id && p.anio === year && p.mes === i + 1);
+        return reg ? Number(reg.avanceFisico) || 0 : 0;
+      }).reduce((s,v)=>s+v,0);
+      if (acumProg === 0) return;
+      const pct = (acumEjec / acumProg) * 100;
+      if (pct >= 95) countVerde++;
+      else if (pct >= 75) countAmarillo++;
+      else countRojo++;
+    });
+
+    const resumenHtml = `
+      <div style="margin-top:32px; page-break-before: auto;">
+        <div style="background:#1E2A3A; color:#F5F1E8; padding:10px 16px; font-size:13px; font-weight:bold; margin-bottom:8px;">
+          TABLA RESUMEN DE AVANCE — AÑO ${year}
+        </div>
+        <table style="width:100%; border-collapse:collapse; font-size:11px;">
+          <thead>
+            <tr style="background:#2D4A6B; color:#FFFFFF;">
+              <th style="border:1px solid #ccc; padding:6px 10px;">ESTADO</th>
+              <th style="border:1px solid #ccc; padding:6px 10px; text-align:center;">CRITERIO</th>
+              <th style="border:1px solid #ccc; padding:6px 10px; text-align:center;">CANTIDAD DE ACTIVIDADES</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr style="background:#C8E6C9;">
+              <td style="border:1px solid #ccc; padding:6px 10px; font-weight:bold; color:#1B5E20;">EN META</td>
+              <td style="border:1px solid #ccc; padding:6px 10px; text-align:center;">Avance acumulado &ge; 95%</td>
+              <td style="border:1px solid #ccc; padding:6px 10px; text-align:center; font-size:16px; font-weight:bold; color:#1B5E20;">${countVerde}</td>
+            </tr>
+            <tr style="background:#FFF9C4;">
+              <td style="border:1px solid #ccc; padding:6px 10px; font-weight:bold; color:#F57F17;">EN PROCESO</td>
+              <td style="border:1px solid #ccc; padding:6px 10px; text-align:center;">Avance acumulado 75% — 94%</td>
+              <td style="border:1px solid #ccc; padding:6px 10px; text-align:center; font-size:16px; font-weight:bold; color:#F57F17;">${countAmarillo}</td>
+            </tr>
+            <tr style="background:#FFCDD2;">
+              <td style="border:1px solid #ccc; padding:6px 10px; font-weight:bold; color:#B71C1C;">EN RIESGO</td>
+              <td style="border:1px solid #ccc; padding:6px 10px; text-align:center;">Avance acumulado &lt; 75%</td>
+              <td style="border:1px solid #ccc; padding:6px 10px; text-align:center; font-size:16px; font-weight:bold; color:#B71C1C;">${countRojo}</td>
+            </tr>
+            <tr style="background:#F0F0F0;">
+              <td colspan="2" style="border:1px solid #ccc; padding:6px 10px; font-weight:bold;">TOTAL ACTIVIDADES CON META</td>
+              <td style="border:1px solid #ccc; padding:6px 10px; text-align:center; font-size:16px; font-weight:bold;">${totalActs}</td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+    `;
+
+    const html = `<!DOCTYPE html>
+<html lang="es">
+<head>
+  <meta charset="UTF-8" />
+  <title>Seguimiento POI ${year}</title>
+  <style>
+    body { font-family: Arial, sans-serif; margin: 20px; color: #1E2A3A; }
+    @media print {
+      body { margin: 10mm; }
+      .no-print { display: none; }
+    }
+    table { page-break-inside: auto; }
+    tr { page-break-inside: avoid; }
+  </style>
+</head>
+<body>
+  <div class="no-print" style="margin-bottom:16px;">
+    <button onclick="window.print()" style="background:#1E2A3A; color:#F5F1E8; border:none; padding:10px 24px; font-size:14px; border-radius:6px; cursor:pointer; margin-right:8px;">Imprimir / Guardar PDF</button>
+    <button onclick="window.close()" style="background:#E5DDD0; color:#1E2A3A; border:none; padding:10px 18px; font-size:14px; border-radius:6px; cursor:pointer;">Cerrar</button>
+  </div>
+  <div style="text-align:center; margin-bottom:24px; border-bottom:2px solid #1E2A3A; padding-bottom:16px;">
+    <div style="font-size:11px; color:#7A6F5C; margin-bottom:4px;">MINISTERIO DE VIVIENDA, CONSTRUCCIÓN Y SANEAMIENTO</div>
+    <div style="font-size:15px; font-weight:bold; color:#1E2A3A; margin-bottom:4px;">REPORTE DE SEGUIMIENTO MENSUAL DEL PLAN OPERATIVO INSTITUCIONAL</div>
+    <div style="font-size:13px; color:#1E2A3A;">Año ${year} — Mes de Cierre: ${MESES[mes - 1]}</div>
+    <div style="font-size:11px; color:#7A6F5C; margin-top:8px;">
+      SECTOR: 37 - VIVIENDA CONSTRUCCION Y SANEAMIENTO &nbsp;|&nbsp;
+      PLIEGO: 037 - MINISTERIO DE VIVIENDA, CONSTRUCCION Y SANEAMIENTO &nbsp;|&nbsp;
+      UE: 001082 - ADM. GENERAL
+    </div>
+  </div>
+  ${bodyHtml}
+  ${resumenHtml}
+  <div style="margin-top:32px; font-size:9px; color:#999; text-align:center; border-top:1px solid #ccc; padding-top:8px;">
+    Generado el ${new Date().toLocaleDateString('es-PE', {day:'2-digit',month:'long',year:'numeric'})} — Sistema de Seguimiento POI PNC
+  </div>
+</body>
+</html>`;
+
+    const win = window.open('', '_blank', 'width=1200,height=800,scrollbars=yes');
+    if (win) {
+      win.document.write(html);
+      win.document.close();
+      setTimeout(() => win.print(), 600);
+    }
+    if (logAuditoria) logAuditoria('exportar_seguimiento_pdf', `Exportó el seguimiento POI ${year} mes ${mes} a PDF`, {});
+  }
+
   // Áreas del CC seleccionado, filtradas por las áreas permitidas al usuario
   // Solo considera actividades activas
   const areas = useMemo(() => {
@@ -3222,11 +3447,18 @@ function Seguimiento({ activities, progress, saveProgress, periodos, solicitudes
     <>
       <PageHeader title="Seguimiento mensual" subtitle="Logros, limitaciones y medidas adoptadas"
         action={
-          <button onClick={exportarSeguimientoExcel}
-            className="flex items-center gap-2 px-4 py-2.5 rounded-md text-sm font-semibold transition-colors"
-            style={{ background: '#1F7A4D', color: '#FFFFFF' }}>
-            <FileSpreadsheet size={16} /> Exportar a Excel
-          </button>
+          <div className="flex gap-2">
+            <button onClick={exportarSeguimientoExcel}
+              className="flex items-center gap-2 px-4 py-2.5 rounded-md text-sm font-semibold transition-colors"
+              style={{ background: '#1F7A4D', color: '#FFFFFF' }}>
+              <FileSpreadsheet size={16} /> Exportar a Excel
+            </button>
+            <button onClick={exportarSeguimientoPDF}
+              className="flex items-center gap-2 px-4 py-2.5 rounded-md text-sm font-semibold transition-colors"
+              style={{ background: '#C0392B', color: '#FFFFFF' }}>
+              <FileText size={16} /> Exportar PDF
+            </button>
+          </div>
         } />
 
       {/* Paso 1: Centro de costo */}
@@ -7203,42 +7435,43 @@ function Auditoria({ eventos }) {
 ============================================================ */
 function seedDemo() {
   const ACTS_DATA = [
-    ['GESTIÓN PNC', 'GESTION PNC', '20260010820008', 'AOI00108200041', 'CONDUCCIÓN Y GESTIÓN DEL PROGRAMA NUESTRAS CIUDADES', 'INFORME', 12, 2094363],
-    ['UGEDEUS', 'UGEDEUS', '20260010820016', 'AOI00108200103', 'CAPACITACIÓN EN GESTIÓN URBANA PARA LA PLANIFICACIÓN DEL DESARROLLO URBANO SOSTENIBLE', 'MUNICIPIO', 24, 250000],
-    ['UGEDEUS', 'UGEDEUS', '20260010820027', 'AOI00108200199', 'IMPLEMENTACIÓN Y MONITOREO DE SISTEMAS DE INFORMACIÓN GEOGRÁFICA PARA LA GESTIÓN URBANA TERRITORIAL', 'MUNICIPIO', 12, 180000],
-    ['UGEDEUS', 'UGEDEUS', '20260010820029', 'AOI00108200204', 'ELABORACIÓN DE PLANES DE ACONDICIONAMIENTO TERRITORIAL, PLANES URBANOS Y ESTUDIOS VINCULADOS A LA GESTIÓN URBANA SOSTENIBLE DE LAS CIUDADES', 'DOCUMENTO', 8, 387160],
-    ['UGERDES', 'EMERGENCIA-DESCOLMATACIÓN', '20260010820445', 'AOI00108202307', 'ATENCIÓN DE ACTIVIDADES DE EMERGENCIA', 'INTERVENCIÓN', 30, 1500000],
-    ['UGERDES', 'EMERGENCIA-TRANSITABILIDAD', '20260010820451', 'AOI00108202316', 'ATENCIÓN DE TRANSITABILIDAD DE VÍAS', 'KILÓMETRO', 25, 800000],
-    ['UGERDES', 'MAQUINARIAS PREVENCIÓN', '20260010820033', 'AOI00108200213', 'INTERVENCIÓN EN MANTENIMIENTO DE CAUCES, DRENAJES Y ESTRUCTURAS DE SEGURIDAD FÍSICA FRENTE A PELIGROS CON LAS UBOS', 'INTERVENCIÓN', 350, 17000000],
-    ['UGERDES', 'UGERDES', '20260010820032', 'AOI00108200212', 'ELABORACIÓN DE ESTUDIOS PARA ESTABLECER EL RIESGO EN LAS CIUDADES', 'DOCUMENTO TÉCNICO', 6, 1200000],
-    ['UGERDES', 'UGERDES', '20260010820034', 'AOI00108200214', 'REALIZACIÓN DE ASISTENCIA TÉCNICA Y ACOMPAÑAMIENTO EN GESTIÓN DEL RIESGO DE DESASTRES EN LAS CIUDADES', 'INFORME TÉCNICO', 60, 1644570],
-    ['UNINDEUS', 'CENTRO DE CONVENCIONES', '20260010820035', 'AOI00108200215', 'REALIZACIÓN DEL MANTENIMIENTO DE INSTALACIONES Y EQUIPAMIENTO DEL CENTRO DE CONVENCIONES 27 DE ENERO', 'MANTENIMIENTO', 12, 0],
-    ['UNINDEUS', 'PIP BELÉN', '20260010820134', 'AOI00108201258', 'GESTIÓN Y ADMINISTRACIÓN PROG-003-2015-SNIP - 2277384 - BELEN', 'INFORME', 12, 0],
-    ['UNINDEUS', 'PIP OLMOS', '20260010820131', 'AOI00108201684', 'GESTIÓN Y ADMINISTRACIÓN 2256322 OLMOS', 'INFORME', 12, 0],
-    ['UNINDEUS', 'PIP OLMOS', '20260010820133', 'AOI00108201259', 'GESTIÓN Y ADMINISTRACIÓN PROG-012-2014-SNIP - 2270290 - OLMOS', 'INFORME', 12, 0],
-    ['UNINDEUS', 'PIP OLMOS', '20260010820146', 'AOI00108201640', 'CONSTRUCCIÓN DEL SISTEMA DE AGUA POTABLE Y ALCANTARILLADO - 2256322 OLMOS', 'OBRA', 1, 0],
-    ['UNINDEUS', 'PIP OLMOS', '20260010820156', 'AOI00108201679', 'SUPERVISIÓN Y LIQUIDACIÓN DE LA OBRA - 2256322 OLMOS', 'INFORME', 1, 0],
-    ['UNINDEUS', 'PIP OLMOS', '20260010820179', 'AOI00108201778', 'CONSTRUCCIÓN DE VÍA LOCAL - PIP 2266697 OLMOS', 'OBRA', 1, 0],
-    ['UNINDEUS', 'PIP OLMOS', '20260010820180', 'AOI00108201776', 'SUPERVISIÓN Y LIQUIDACIÓN PIP 2266697 OLMOS', 'INFORME', 1, 0],
-    ['UNINDEUS', 'PIP OLMOS', '20260010820181', 'AOI00108201777', 'GESTIÓN Y ADMINISTRACIÓN PIP 2266697 OLMOS', 'INFORME', 12, 0],
-    ['UNINDEUS', 'PIP OLMOS', '20260010820198', 'AOI00108201852', 'EXPEDIENTE TÉCNICO 2256322 - OLMOS', 'DOCUMENTO', 1, 0],
-    ['UNINDEUS', 'PIP OLMOS', '20260010820199', 'AOI00108201854', 'EXPEDIENTE TÉCNICO PIP 2266697 OLMOS', 'DOCUMENTO', 1, 0],
-    ['UNINDEUS', 'PIP PLAZA LA HERMANDAD', '20260010820450', 'AOI00108202315', 'GESTIÓN Y ADMINISTRACIÓN 2414594', 'INFORME', 12, 0],
-    ['UNINDEUS', 'PIP ZARUMILLA MALECON', '20260010820143', 'AOI00108201680', 'SUPERVISIÓN Y LIQUIDACIÓN DE OBRAS 2288094 ZARUMILLA', 'INFORME', 1, 0],
-    ['UNINDEUS', 'PIP ZARUMILLA MALECON', '20260010820212', 'AOI00108202108', 'CONSTRUCCIÓN DE BOULEVARD - PIP 2288094', 'OBRA', 1, 0],
-    ['UNINDEUS', 'PIP ZARUMILLA MALECON', '20260010820215', 'AOI00108202109', 'GESTIÓN Y ADMINISTRACIÓN - PIP 2288094', 'INFORME', 12, 0],
-    ['UNINDEUS', 'PIP ZARUMILLA MALECON', '20260010820330', 'AOI00108202172', 'EXPEDIENTE TÉCNICO -PIP 2288094', 'DOCUMENTO', 1, 0],
-    ['UNINDEUS', 'PRE INVERSIÓN', '20260010820329', 'AOI00108202171', 'ESTUDIOS DE PRE-INVERSIÓN', 'DOCUMENTO', 4, 0],
-    ['UNINDEUS', 'UNINDEUS', '20260010820014', 'AOI00108200084', 'REALIZACIÓN DE ASISTENCIA TÉCNICA A LAS UNIDADES FORMULADORAS Y EVALUADORAS DE LOS GOBIERNOS LOCALES', 'PERSONA CAPACITADA', 80, 0],
-    ['UNINDEUS', 'UNINDEUS', '20260010820015', 'AOI00108200085', 'PROMOCIÓN DE LAS INVERSIONES PÚBLICO PRIVADAS EN PROYECTOS IDENTIFICADOS EN INSTRUMENTOS PARA LA GESTIÓN URBANO TERRITORIAL', 'EVENTO', 6, 0],
+    ['GESTIÓN PNC', 'GESTION PNC', '20260010820008', 'AOI00108200041', 'CONDUCCIÓN Y GESTIÓN DEL PROGRAMA NUESTRAS CIUDADES', 'INFORME', 12, 2094363, 'Comprende las acciones de conducción, coordinación y gestión administrativa, financiera y operativa del Programa Nuestras Ciudades, asegurando la planificación, ejecución y evaluación eficiente de los proyectos a nivel nacional.'],
+    ['UGEDEUS', 'UGEDEUS', '20260010820016', 'AOI00108200103', 'CAPACITACIÓN EN GESTIÓN URBANA PARA LA PLANIFICACIÓN DEL DESARROLLO URBANO SOSTENIBLE', 'MUNICIPIO', 24, 250000, 'Capacitación a funcionarios y técnicos de gobiernos locales en materias de gestión urbana para el desarrollo urbano sostenible y la planificación territorial.'],
+    ['UGEDEUS', 'UGEDEUS', '20260010820027', 'AOI00108200199', 'IMPLEMENTACIÓN Y MONITOREO DE SISTEMAS DE INFORMACIÓN GEOGRÁFICA PARA LA GESTIÓN URBANA TERRITORIAL', 'MUNICIPIO', 12, 180000, 'Implementación y monitoreo de Sistemas de Información Geográfica (SIG) accesibles para los procesos de planificación y gestión urbana territorial, dirigido a entidades públicas, privadas y sociedad civil.'],
+    ['UGEDEUS', 'UGEDEUS', '20260010820029', 'AOI00108200204', 'ELABORACIÓN DE PLANES DE ACONDICIONAMIENTO TERRITORIAL, PLANES URBANOS Y ESTUDIOS VINCULADOS A LA GESTIÓN URBANA SOSTENIBLE DE LAS CIUDADES', 'DOCUMENTO', 8, 387160, 'Elaboración de planes de acondicionamiento territorial, planes urbanos y estudios vinculados a la gestión urbana sostenible de las ciudades, con asistencia técnica a gobiernos regionales y locales.'],
+    ['UGERDES', 'EMERGENCIA-DESCOLMATACIÓN', '20260010820445', 'AOI00108202307', 'ATENCIÓN DE ACTIVIDADES DE EMERGENCIA', 'INTERVENCIÓN', 30, 1500000, 'Atención de actividades de emergencia mediante intervención con maquinaria pesada para la prevención, mitigación y respuesta ante desastres naturales en las ciudades del país.'],
+    ['UGERDES', 'EMERGENCIA-TRANSITABILIDAD', '20260010820451', 'AOI00108202316', 'ATENCIÓN DE TRANSITABILIDAD DE VÍAS', 'KILÓMETRO', 25, 800000, 'Atención de la transitabilidad de vías afectadas por fenómenos naturales mediante intervención con maquinaria de las Unidades Básicas Operativas (UBO) del PNC.'],
+    ['UGERDES', 'MAQUINARIAS PREVENCIÓN', '20260010820033', 'AOI00108200213', 'INTERVENCIÓN EN MANTENIMIENTO DE CAUCES, DRENAJES Y ESTRUCTURAS DE SEGURIDAD FÍSICA FRENTE A PELIGROS CON LAS UBOS', 'INTERVENCIÓN', 350, 17000000, 'Intervención en mantenimiento de cauces, drenajes y estructuras de seguridad física frente a peligros con las Unidades Básicas Operativas (UBO), para reducir condiciones de riesgo de la población.'],
+    ['UGERDES', 'UGERDES', '20260010820032', 'AOI00108200212', 'ELABORACIÓN DE ESTUDIOS PARA ESTABLECER EL RIESGO EN LAS CIUDADES', 'DOCUMENTO TÉCNICO', 6, 1200000, 'Elaboración de estudios para establecer el riesgo en las ciudades, pertinentes para los tomadores de decisiones en materia de gestión del riesgo de desastres.'],
+    ['UGERDES', 'UGERDES', '20260010820034', 'AOI00108200214', 'REALIZACIÓN DE ASISTENCIA TÉCNICA Y ACOMPAÑAMIENTO EN GESTIÓN DEL RIESGO DE DESASTRES EN LAS CIUDADES', 'INFORME TÉCNICO', 60, 1644570, 'Realización de asistencia técnica y acompañamiento en gestión del riesgo de desastres en las ciudades, fortaleciendo capacidades instaladas para la preparación y respuesta frente a emergencias y desastres.'],
+    ['UNINDEUS', 'CENTRO DE CONVENCIONES', '20260010820035', 'AOI00108200215', 'REALIZACIÓN DEL MANTENIMIENTO DE INSTALACIONES Y EQUIPAMIENTO DEL CENTRO DE CONVENCIONES 27 DE ENERO', 'MANTENIMIENTO', 12, 0, 'Realización del mantenimiento de instalaciones y equipamiento del Centro de Convenciones 27 de Enero, ciudad de Lima, para garantizar su operatividad.'],
+    ['UNINDEUS', 'PIP BELÉN', '20260010820134', 'AOI00108201258', 'GESTIÓN Y ADMINISTRACIÓN PROG-003-2015-SNIP - 2277384 - BELEN', 'INFORME', 12, 0, 'Gestión y administración del Programa de Inversión PROG-003-2015-SNIP - 2277384 correspondiente al proyecto de Belén.'],
+    ['UNINDEUS', 'PIP OLMOS', '20260010820131', 'AOI00108201684', 'GESTIÓN Y ADMINISTRACIÓN 2256322 OLMOS', 'INFORME', 12, 0, 'Gestión y administración del proyecto de inversión 2256322 Olmos, incluyendo coordinaciones, reportes y seguimiento de la ejecución.'],
+    ['UNINDEUS', 'PIP OLMOS', '20260010820133', 'AOI00108201259', 'GESTIÓN Y ADMINISTRACIÓN PROG-012-2014-SNIP - 2270290 - OLMOS', 'INFORME', 12, 0, 'Gestión y administración del Programa de Inversión PROG-012-2014-SNIP - 2270290 correspondiente al proyecto de Olmos.'],
+    ['UNINDEUS', 'PIP OLMOS', '20260010820146', 'AOI00108201640', 'CONSTRUCCIÓN DEL SISTEMA DE AGUA POTABLE Y ALCANTARILLADO - 2256322 OLMOS', 'OBRA', 1, 0, 'Construcción del sistema de agua potable y alcantarillado del proyecto 2256322 Olmos.'],
+    ['UNINDEUS', 'PIP OLMOS', '20260010820156', 'AOI00108201679', 'SUPERVISIÓN Y LIQUIDACIÓN DE LA OBRA - 2256322 OLMOS', 'INFORME', 1, 0, 'Supervisión y liquidación de la obra de construcción del sistema de agua potable y alcantarillado del proyecto 2256322 Olmos.'],
+    ['UNINDEUS', 'PIP OLMOS', '20260010820179', 'AOI00108201778', 'CONSTRUCCIÓN DE VÍA LOCAL - PIP 2266697 OLMOS', 'OBRA', 1, 0, 'Construcción de vía local del proyecto PIP 2266697 Olmos.'],
+    ['UNINDEUS', 'PIP OLMOS', '20260010820180', 'AOI00108201776', 'SUPERVISIÓN Y LIQUIDACIÓN PIP 2266697 OLMOS', 'INFORME', 1, 0, 'Supervisión y liquidación del proyecto PIP 2266697 Olmos.'],
+    ['UNINDEUS', 'PIP OLMOS', '20260010820181', 'AOI00108201777', 'GESTIÓN Y ADMINISTRACIÓN PIP 2266697 OLMOS', 'INFORME', 12, 0, 'Gestión y administración del proyecto PIP 2266697 Olmos.'],
+    ['UNINDEUS', 'PIP OLMOS', '20260010820198', 'AOI00108201852', 'EXPEDIENTE TÉCNICO 2256322 - OLMOS', 'DOCUMENTO', 1, 0, 'Elaboración del expediente técnico del proyecto 2256322 Olmos.'],
+    ['UNINDEUS', 'PIP OLMOS', '20260010820199', 'AOI00108201854', 'EXPEDIENTE TÉCNICO PIP 2266697 OLMOS', 'DOCUMENTO', 1, 0, 'Elaboración del expediente técnico del proyecto PIP 2266697 Olmos.'],
+    ['UNINDEUS', 'PIP PLAZA LA HERMANDAD', '20260010820450', 'AOI00108202315', 'GESTIÓN Y ADMINISTRACIÓN 2414594', 'INFORME', 12, 0, 'Gestión y administración del proyecto 2414594 Plaza La Hermandad.'],
+    ['UNINDEUS', 'PIP ZARUMILLA MALECON', '20260010820143', 'AOI00108201680', 'SUPERVISIÓN Y LIQUIDACIÓN DE OBRAS 2288094 ZARUMILLA', 'INFORME', 1, 0, 'Supervisión y liquidación de obras del proyecto 2288094 Zarumilla.'],
+    ['UNINDEUS', 'PIP ZARUMILLA MALECON', '20260010820212', 'AOI00108202108', 'CONSTRUCCIÓN DE BOULEVARD - PIP 2288094', 'OBRA', 1, 0, 'Construcción de boulevard del proyecto PIP 2288094 Zarumilla.'],
+    ['UNINDEUS', 'PIP ZARUMILLA MALECON', '20260010820215', 'AOI00108202109', 'GESTIÓN Y ADMINISTRACIÓN - PIP 2288094', 'INFORME', 12, 0, 'Gestión y administración del proyecto PIP 2288094 Zarumilla.'],
+    ['UNINDEUS', 'PIP ZARUMILLA MALECON', '20260010820330', 'AOI00108202172', 'EXPEDIENTE TÉCNICO -PIP 2288094', 'DOCUMENTO', 1, 0, 'Elaboración del expediente técnico del proyecto PIP 2288094 Zarumilla.'],
+    ['UNINDEUS', 'PRE INVERSIÓN', '20260010820329', 'AOI00108202171', 'ESTUDIOS DE PRE-INVERSIÓN', 'DOCUMENTO', 4, 0, 'Realización de estudios de pre-inversión para la identificación y formulación de nuevos proyectos de inversión pública.'],
+    ['UNINDEUS', 'UNINDEUS', '20260010820014', 'AOI00108200084', 'REALIZACIÓN DE ASISTENCIA TÉCNICA A LAS UNIDADES FORMULADORAS Y EVALUADORAS DE LOS GOBIERNOS LOCALES', 'PERSONA CAPACITADA', 80, 0, 'Realización de asistencia técnica a las unidades formuladoras y evaluadoras de los gobiernos locales para mejorar la calidad de los proyectos de inversión pública.'],
+    ['UNINDEUS', 'UNINDEUS', '20260010820015', 'AOI00108200085', 'PROMOCIÓN DE LAS INVERSIONES PÚBLICO PRIVADAS EN PROYECTOS IDENTIFICADOS EN INSTRUMENTOS PARA LA GESTIÓN URBANO TERRITORIAL', 'EVENTO', 6, 0, 'Promoción de las inversiones público privadas en proyectos identificados en instrumentos para la gestión urbano territorial.'],
   ];
 
-  const activities = ACTS_DATA.map(([cc, area, reg, aoi, nombre, ud, meta, presup]) => {
+  const activities = ACTS_DATA.map(([cc, area, reg, aoi, nombre, ud, meta, presup, descripcion]) => {
     const fisMensual = Math.floor(meta / 12);
     const fisRest = meta % 12;
     const finMensual = presup / 12;
     return {
       id: uid(), centroCosto: cc, area, codigoRegistro: reg, codigoAOI: aoi, nombre,
+      descripcion: descripcion || '', fuentesFinanciamiento: [],
       unidadMedida: ud, responsable: '', metaAnualFisica: meta, presupuestoAnual: presup,
       programacion: Array.from({ length: 12 }, (_, i) => ({
         fisica: fisMensual + (i < fisRest ? 1 : 0),
