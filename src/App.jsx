@@ -1932,9 +1932,11 @@ async function procesarImportacion(archivos, activities, progress, year, saveAct
         const act = acts.find(a => a.codigoAOI === aoiCode);
         if (!act) { if (!resultados.noEncontrados.includes(aoiCode)) resultados.noEncontrados.push(aoiCode); continue; }
 
-        const pimFis = Array.from({ length: 12 }, (_, m) => Number(row[26 + m]) || 0);
+        // F(RE) 01-12 = cols 27-38 (PIM reprogramado mensual)
+        const pimFis = Array.from({ length: 12 }, (_, m) => Number(row[27 + m]) || 0);
+        // F(SE) 01-12 = cols 40-51 (ejecución/seguimiento mensual)
         const ejecFis = Array.from({ length: 12 }, (_, m) => {
-          const v = row[39 + m];
+          const v = row[40 + m];
           return (v !== null && v !== undefined && !isNaN(Number(v))) ? Number(v) : null;
         });
 
@@ -2006,8 +2008,9 @@ async function procesarImportacion(archivos, activities, progress, year, saveAct
         const aoiCode = String(row[3]).trim();
         if (!aoiCode.startsWith('AOI')) continue;
         if (!byAOI[aoiCode]) byAOI[aoiCode] = Array(12).fill(0);
+        // DEV ENE-DIC = cols 9-20
         for (let m = 0; m < 12; m++) {
-          byAOI[aoiCode][m] += Number(row[8 + m]) || 0;
+          byAOI[aoiCode][m] += Number(row[9 + m]) || 0;
         }
       }
 
