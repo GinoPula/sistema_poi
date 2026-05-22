@@ -2551,9 +2551,6 @@ function ActivityForm({ activity, setActivity, isNew, onSave, onClose, activitie
           <Field label="Nombre de la actividad" full>
             <textarea rows={2} value={activity.nombre} onChange={(e) => update('nombre', e.target.value)} className={inputCls} />
           </Field>
-          <Field label="Descripción de la actividad" full>
-            <textarea rows={3} value={activity.descripcion || ''} onChange={(e) => update('descripcion', e.target.value)} className={inputCls} placeholder="Descripción detallada de la actividad operativa..." />
-          </Field>
           <Field label="Unidad de medida">
             <input type="text" value={activity.unidadMedida} onChange={(e) => update('unidadMedida', e.target.value)} className={inputCls} />
           </Field>
@@ -3162,31 +3159,55 @@ function Seguimiento({ activities, progress, saveProgress, periodos, solicitudes
       `;
 
       actsCC.forEach(a => {
-        // Calcular acumulados
-        const progMeses = Array.from({length:12}, (_, i) => Number(a.programacion?.[i]?.fisica) || 0);
-        const ejecMeses = Array.from({length:12}, (_, i) => {
+        // FÍSICO
+        const progFisMeses = Array.from({length:12}, (_, i) => Number(a.programacion?.[i]?.fisica) || 0);
+        const ejecFisMeses = Array.from({length:12}, (_, i) => {
           const reg = progress.find(p => p.actividadId === a.id && p.anio === year && p.mes === i + 1);
           return reg ? Number(reg.avanceFisico) || 0 : 0;
         });
-        const acumProg = progMeses.reduce((s, v) => s + v, 0);
-        const acumEjec = ejecMeses.reduce((s, v) => s + v, 0);
-        const pct = acumProg > 0 ? ((acumEjec / acumProg) * 100).toFixed(1) : '—';
-        const pctNum = acumProg > 0 ? (acumEjec / acumProg) * 100 : 0;
-        const pctColor = acumProg === 0 ? '#FFFFFF' : pctNum >= 95 ? '#C8E6C9' : pctNum >= 75 ? '#FFF9C4' : '#FFCDD2';
+        const acumProgFis = progFisMeses.reduce((s, v) => s + v, 0);
+        const acumEjecFis = ejecFisMeses.reduce((s, v) => s + v, 0);
+        const pctFis = acumProgFis > 0 ? ((acumEjecFis / acumProgFis) * 100).toFixed(1) : '—';
+        const pctFisNum = acumProgFis > 0 ? (acumEjecFis / acumProgFis) * 100 : 0;
+        const pctFisColor = acumProgFis === 0 ? '#FFFFFF' : pctFisNum >= 95 ? '#C8E6C9' : pctFisNum >= 75 ? '#FFF9C4' : '#FFCDD2';
+
+        // FINANCIERO
+        const progFinMeses = Array.from({length:12}, (_, i) => Number(a.programacion?.[i]?.financiera) || 0);
+        const ejecFinMeses = Array.from({length:12}, (_, i) => {
+          const reg = progress.find(p => p.actividadId === a.id && p.anio === year && p.mes === i + 1);
+          return reg ? Number(reg.avanceFinanciero) || 0 : 0;
+        });
+        const acumProgFin = progFinMeses.reduce((s, v) => s + v, 0);
+        const acumEjecFin = ejecFinMeses.reduce((s, v) => s + v, 0);
+        const pctFin = acumProgFin > 0 ? ((acumEjecFin / acumProgFin) * 100).toFixed(1) : '—';
+        const pctFinNum = acumProgFin > 0 ? (acumEjecFin / acumProgFin) * 100 : 0;
+        const pctFinColor = acumProgFin === 0 ? '#FFFFFF' : pctFinNum >= 95 ? '#C8E6C9' : pctFinNum >= 75 ? '#FFF9C4' : '#FFCDD2';
+        const fmtS = v => v > 0 ? 'S/'+Number(v).toLocaleString('es-PE',{minimumFractionDigits:2,maximumFractionDigits:2}) : '';
 
         bodyHtml += `
           <tr style="background:#F8F5F0;">
-            <td rowspan="2" style="border:1px solid #ccc; padding:4px 6px; font-family:monospace; font-size:9px; white-space:nowrap; vertical-align:middle;">${a.codigoAOI}</td>
-            <td rowspan="2" style="border:1px solid #ccc; padding:4px 6px; vertical-align:middle; max-width:260px;">${a.nombre}</td>
-            <td rowspan="2" style="border:1px solid #ccc; padding:4px 6px; text-align:center; vertical-align:middle; white-space:nowrap;">${a.unidadMedida || ''}</td>
+            <td rowspan="4" style="border:1px solid #ccc; padding:4px 6px; font-family:monospace; font-size:9px; white-space:nowrap; vertical-align:middle;">${a.codigoAOI}</td>
+            <td rowspan="4" style="border:1px solid #ccc; padding:4px 6px; vertical-align:middle; max-width:240px;">${a.nombre}</td>
+            <td rowspan="2" style="border:1px solid #ccc; padding:4px 4px; text-align:center; vertical-align:middle; font-size:9px; font-weight:bold; color:#555; background:#EEF;">FÍSICO<br/>${a.unidadMedida||''}</td>
             <td style="border:1px solid #ccc; padding:3px 6px; font-size:9px; font-weight:bold; color:#1E2A3A; background:#EEE8D8;">PROGRAMADO</td>
-            ${progMeses.map(v => `<td style="border:1px solid #ccc; padding:3px 4px; text-align:right;">${v || ''}</td>`).join('')}
-            <td rowspan="2" style="border:1px solid #ccc; padding:4px 6px; text-align:center; vertical-align:middle; font-weight:bold;">${acumProg}</td>
-            <td rowspan="2" style="border:1px solid #ccc; padding:4px 6px; text-align:center; vertical-align:middle; font-weight:bold; background:${pctColor};">${acumProg === 0 ? '—' : pct + '%'}</td>
+            ${progFisMeses.map(v => `<td style="border:1px solid #ccc; padding:3px 3px; text-align:right; font-size:9px;">${v||''}</td>`).join('')}
+            <td rowspan="2" style="border:1px solid #ccc; padding:4px 4px; text-align:center; vertical-align:middle; font-weight:bold; font-size:9px;">${acumProgFis}</td>
+            <td rowspan="2" style="border:1px solid #ccc; padding:4px 4px; text-align:center; vertical-align:middle; font-weight:bold; font-size:9px; background:${pctFisColor};">${acumProgFis===0?'—':pctFis+'%'}</td>
           </tr>
-          <tr>
+          <tr style="background:#F8F5F0;">
             <td style="border:1px solid #ccc; padding:3px 6px; font-size:9px; font-weight:bold; color:#2D7A4E; background:#E8F2EC;">EJECUTADO</td>
-            ${ejecMeses.map(v => `<td style="border:1px solid #ccc; padding:3px 4px; text-align:right; color:#2D7A4E;">${v || ''}</td>`).join('')}
+            ${ejecFisMeses.map(v => `<td style="border:1px solid #ccc; padding:3px 3px; text-align:right; font-size:9px; color:#2D7A4E;">${v||''}</td>`).join('')}
+          </tr>
+          <tr style="background:#FFF8F0;">
+            <td rowspan="2" style="border:1px solid #ccc; padding:4px 4px; text-align:center; vertical-align:middle; font-size:9px; font-weight:bold; color:#555; background:#FFF0DD;">FINANCIERO<br/>S/</td>
+            <td style="border:1px solid #ccc; padding:3px 6px; font-size:9px; font-weight:bold; color:#1E2A3A; background:#EEE8D8;">PROGRAMADO</td>
+            ${progFinMeses.map(v => `<td style="border:1px solid #ccc; padding:3px 3px; text-align:right; font-size:8px;">${fmtS(v)}</td>`).join('')}
+            <td rowspan="2" style="border:1px solid #ccc; padding:4px 4px; text-align:center; vertical-align:middle; font-weight:bold; font-size:9px;">${fmtS(acumProgFin)}</td>
+            <td rowspan="2" style="border:1px solid #ccc; padding:4px 4px; text-align:center; vertical-align:middle; font-weight:bold; font-size:9px; background:${pctFinColor};">${acumProgFin===0?'—':pctFin+'%'}</td>
+          </tr>
+          <tr style="background:#FFF8F0;">
+            <td style="border:1px solid #ccc; padding:3px 6px; font-size:9px; font-weight:bold; color:#C9A350; background:#FFF3DC;">EJECUTADO</td>
+            ${ejecFinMeses.map(v => `<td style="border:1px solid #ccc; padding:3px 3px; text-align:right; font-size:8px; color:#9C7A2B;">${fmtS(v)}</td>`).join('')}
           </tr>
         `;
       });
