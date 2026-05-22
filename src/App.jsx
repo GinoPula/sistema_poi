@@ -10,7 +10,7 @@ import {
 import {
   BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, Legend,
   ResponsiveContainer, LineChart, Line, ComposedChart, Area, Cell,
-  PieChart, Pie
+  PieChart, Pie, LabelList
 } from 'recharts';
 
 const MESES = [
@@ -56,6 +56,25 @@ const fmtMillonesEnteros = (n) => {
 const fmtPct = (n) => `${(Number(n) || 0).toFixed(1)}%`;
 const uid = () => Math.random().toString(36).slice(2, 10);
 
+// Renderer de etiqueta de % sobre las barras. Recharts pasa {x, y, width, value}.
+// value es el string del campo indicado en dataKey (ej "87%" o "").
+function PctBarLabel(props) {
+  const { x, y, width, value } = props;
+  if (!value) return null;
+  return (
+    <text
+      x={Number(x) + Number(width) / 2}
+      y={Number(y) - 4}
+      textAnchor="middle"
+      fontSize={10}
+      fontWeight={700}
+      fill="#1E2A3A">
+      {value}
+    </text>
+  );
+}
+
+
 // Genéricas de gasto del clasificador presupuestal MEF
 const GENERICAS_GASTO = [
   { codigo: '2.1', nombre: 'PERSONAL Y OBLIGACIONES SOCIALES' },
@@ -76,19 +95,57 @@ function nuevasGenericas() {
   return g;
 }
 
+// Crea estructura vacía de física mensual PIA y PIM (12 meses cada una)
+function nuevaFisicaMensual() {
+  return {
+    pia: Array.from({ length: 12 }, () => 0),
+    pim: Array.from({ length: 12 }, () => 0),
+  };
+}
+
+// Suma anual de la física mensual por tipo (pia|pim), opcionalmente hasta cierto mes
+function totalFisicaActividad(a, tipo, hastaMes = 12) {
+  const arr = a.fisicaMensual?.[tipo] || [];
+  let total = 0;
+  for (let i = 0; i < hastaMes && i < 12; i++) total += Number(arr[i]) || 0;
+  return total;
+}
+
 // Migra una actividad antigua (programacion: [{fisica, financiera}]) al nuevo modelo de genéricas.
 // Coloca el financiero antiguo en la genérica 2.3 BIENES Y SERVICIOS, con PIA = PIM inicialmente.
+// También crea la física mensual PIA/PIM desde programacion[].fisica.
 function migrarActividadGenericas(a) {
-  if (a.genericas && typeof a.genericas === 'object') return a; // ya migrada
-  const g = nuevasGenericas();
-  if (Array.isArray(a.programacion)) {
-    a.programacion.forEach((p, i) => {
-      const fin = Number(p?.financiera) || 0;
-      g['2.3'].pia[i] = fin;
-      g['2.3'].pim[i] = fin;
-    });
+  let out = { ...a };
+  // Migrar genéricas financieras
+  if (!out.genericas || typeof out.genericas !== 'object') {
+    const g = nuevasGenericas();
+    if (Array.isArray(out.programacion)) {
+      out.programacion.forEach((p, i) => {
+        const fin = Number(p?.financiera) || 0;
+        g['2.3'].pia[i] = fin;
+        g['2.3'].pim[i] = fin;
+      });
+    }
+    out.genericas = g;
   }
-  return { ...a, genericas: g };
+  // Migrar física mensual PIA/PIM
+  if (!out.fisicaMensual || typeof out.fisicaMensual !== 'object') {
+    const fm = nuevaFisicaMensual();
+    if (Array.isArray(out.programacion)) {
+      out.programacion.forEach((p, i) => {
+        const fis = Number(p?.fisica) || 0;
+        fm.pia[i] = fis;
+        fm.pim[i] = fis;
+      });
+    }
+    out.fisicaMensual = fm;
+  }
+  // Flag de bloqueo de PIA (default: bloqueado si ya tiene datos, abierto si es nueva)
+  if (typeof out.piaBloqueado === 'undefined') {
+    const tieneDatos = totalFinancieroActividad(out, 'pia') > 0 || totalFisicaActividad(out, 'pia') > 0;
+    out.piaBloqueado = tieneDatos; // si ya tiene PIA cargado, queda bloqueado
+  }
+  return out;
 }
 
 // Suma total financiera de una actividad para un tipo (pia|pim), opcionalmente hasta cierto mes
@@ -1165,12 +1222,18 @@ function Dashboard({ activities, progress, modifs, currentUser }) {
     const monthRegs = progVisibles.filter(p => p.mes === i + 1);
     const ejecFin = monthRegs.reduce((s, p) => s + (Number(p.avanceFinanciero) || 0), 0);
     const ejecFis = monthRegs.reduce((s, p) => s + (Number(p.avanceFisico) || 0), 0);
+    const pFin = progFin > 0 ? (ejecFin / progFin) * 100 : 0;
+    const pFis = progFis > 0 ? (ejecFis / progFis) * 100 : 0;
     return {
       mes: MESES_ABR[i],
       Programado: progFin,
       Ejecutado: ejecFin,
       ProgFis: progFis,
       EjecFis: ejecFis,
+      pctFin: pFin,
+      pctFis: pFis,
+      pctFinLabel: ejecFin > 0 ? `${pFin.toFixed(0)}%` : '',
+      pctFisLabel: ejecFis > 0 ? `${pFis.toFixed(0)}%` : '',
       seleccionado: esAcumuladoHasta ? (i + 1) <= mesFiltro : (i + 1) === mesFiltro,
       esAcumGeneral: false,
     };
@@ -1183,12 +1246,18 @@ function Dashboard({ activities, progress, modifs, currentUser }) {
   const totalEjecFisAnual = progVisibles.reduce((s, p) => s + (Number(p.avanceFisico) || 0), 0);
   const totalProgFisAnual = actsVisibles.reduce((s, a) =>
     s + (a.programacion || []).reduce((ss, p) => ss + (Number(p?.fisica) || 0), 0), 0);
+  const pFinAcum = totalPIM > 0 ? (totalEjecFinAnual / totalPIM) * 100 : 0;
+  const pFisAcum = totalProgFisAnual > 0 ? (totalEjecFisAnual / totalProgFisAnual) * 100 : 0;
   chartData.push({
     mes: 'ACUM.',
     Programado: totalPIM,
     Ejecutado: totalEjecFinAnual,
     ProgFis: totalProgFisAnual,
     EjecFis: totalEjecFisAnual,
+    pctFin: pFinAcum,
+    pctFis: pFisAcum,
+    pctFinLabel: totalEjecFinAnual > 0 ? `${pFinAcum.toFixed(0)}%` : '',
+    pctFisLabel: totalEjecFisAnual > 0 ? `${pFisAcum.toFixed(0)}%` : '',
     seleccionado: true,
     esAcumGeneral: true,
   });
@@ -1286,7 +1355,7 @@ function Dashboard({ activities, progress, modifs, currentUser }) {
           </div>
         </div>
         <ResponsiveContainer width="100%" height={300}>
-          <BarChart data={chartData} barCategoryGap="20%" barGap={-30}>
+          <BarChart data={chartData} barCategoryGap="20%" barGap={-30} margin={{ top: 24, right: 10, left: 0, bottom: 0 }}>
             <CartesianGrid strokeDasharray="3 3" stroke="#E5DDD0" />
             <XAxis dataKey="mes" tick={{ fontSize: 11, fill: '#7A6F5C' }} />
             <YAxis tick={{ fontSize: 11, fill: '#7A6F5C' }} tickFormatter={fmtMillonesEnteros} />
@@ -1305,6 +1374,7 @@ function Dashboard({ activities, progress, modifs, currentUser }) {
                 const color = d.esAcumGeneral ? '#C9A350' : (d.seleccionado ? colorEjecucion(pctMes) : colorEjecucionTenue(pctMes));
                 return <Cell key={i} fill={color} />;
               })}
+              <LabelList dataKey="pctFinLabel" content={PctBarLabel} />
             </Bar>
           </BarChart>
         </ResponsiveContainer>
@@ -1321,7 +1391,7 @@ function Dashboard({ activities, progress, modifs, currentUser }) {
           </div>
         </div>
         <ResponsiveContainer width="100%" height={300}>
-          <BarChart data={chartData} barCategoryGap="20%" barGap={-30}>
+          <BarChart data={chartData} barCategoryGap="20%" barGap={-30} margin={{ top: 24, right: 10, left: 0, bottom: 0 }}>
             <CartesianGrid strokeDasharray="3 3" stroke="#E5DDD0" />
             <XAxis dataKey="mes" tick={{ fontSize: 11, fill: '#7A6F5C' }} />
             <YAxis tick={{ fontSize: 11, fill: '#7A6F5C' }} />
@@ -1338,6 +1408,7 @@ function Dashboard({ activities, progress, modifs, currentUser }) {
                 const color = d.esAcumGeneral ? '#C9A350' : (d.seleccionado ? colorEjecucion(pctMes) : colorEjecucionTenue(pctMes));
                 return <Cell key={i} fill={color} />;
               })}
+              <LabelList dataKey="pctFisLabel" content={PctBarLabel} />
             </Bar>
           </BarChart>
         </ResponsiveContainer>
@@ -1500,7 +1571,11 @@ function CentrosCosto({ activities, progress, modifs, currentUser }) {
     const monthProgs = progress.filter(p => p.mes === i + 1 && acts.some(a => a.id === p.actividadId));
     const ejecFis = monthProgs.reduce((s, p) => s + (Number(p.avanceFisico) || 0), 0);
     const ejecFin = monthProgs.reduce((s, p) => s + (Number(p.avanceFinanciero) || 0), 0);
-    return { mes: MESES_ABR[i], mesIdx: i + 1, progFis, progFin, ejecFis, ejecFin };
+    return { mes: MESES_ABR[i], mesIdx: i + 1, progFis, progFin, ejecFis, ejecFin,
+      pctFin: progFin > 0 ? (ejecFin / progFin) * 100 : 0,
+      pctFis: progFis > 0 ? (ejecFis / progFis) * 100 : 0,
+      pctFinLabel: ejecFin > 0 ? `${(progFin > 0 ? (ejecFin / progFin) * 100 : 0).toFixed(0)}%` : '',
+      pctFisLabel: ejecFis > 0 ? `${(progFis > 0 ? (ejecFis / progFis) * 100 : 0).toFixed(0)}%` : '' };
   });
   let accProgFis = 0, accProgFin = 0, accEjecFis = 0, accEjecFin = 0;
   data.forEach(d => {
@@ -1528,6 +1603,10 @@ function CentrosCosto({ activities, progress, modifs, currentUser }) {
     progFin: totProgFinAnualCC,
     ejecFis: totEjecFisAnualCC,
     ejecFin: totEjecFinAnualCC,
+    pctFin: totProgFinAnualCC > 0 ? (totEjecFinAnualCC / totProgFinAnualCC) * 100 : 0,
+    pctFis: totProgFisAnualCC > 0 ? (totEjecFisAnualCC / totProgFisAnualCC) * 100 : 0,
+    pctFinLabel: totEjecFinAnualCC > 0 ? `${(totProgFinAnualCC > 0 ? (totEjecFinAnualCC / totProgFinAnualCC) * 100 : 0).toFixed(0)}%` : '',
+    pctFisLabel: totEjecFisAnualCC > 0 ? `${(totProgFisAnualCC > 0 ? (totEjecFisAnualCC / totProgFisAnualCC) * 100 : 0).toFixed(0)}%` : '',
     seleccionado: true,
     esAcumGeneral: true,
   });
@@ -1646,19 +1725,9 @@ function CentrosCosto({ activities, progress, modifs, currentUser }) {
               Programado vs ejecutado {esAcumuladoHasta ? `— Acumulado a ${MESES[mesFiltro-1].toLowerCase()}` : `— Mes: ${MESES[mesFiltro-1]}`}
             </div>
           </div>
-          <div className="flex gap-4 text-xs">
-            <div>
-              <div className="uppercase tracking-wider" style={{ color: '#7A6F5C' }}>{esAcumuladoHasta ? 'Prog. anual (PIM)' : 'Prog. del mes'}</div>
-              <div className="font-semibold" style={{ color: '#1E2A3A' }}>{kpiProgFis.toFixed(0)}</div>
-            </div>
-            <div>
-              <div className="uppercase tracking-wider" style={{ color: '#7A6F5C' }}>{esAcumuladoHasta ? 'Ejec. acumulada' : 'Ejec. del mes'}</div>
-              <div className="font-semibold" style={{ color: colorEjecucion(ejecFisPct) }}>{kpiEjecFis.toFixed(0)}</div>
-            </div>
-          </div>
         </div>
         <ResponsiveContainer width="100%" height={280}>
-          <BarChart data={data} barCategoryGap="20%" barGap={-30}>
+          <BarChart data={data} barCategoryGap="20%" barGap={-30} margin={{ top: 24, right: 10, left: 0, bottom: 0 }}>
             <CartesianGrid strokeDasharray="3 3" stroke="#E5DDD0" />
             <XAxis dataKey="mes" tick={{ fontSize: 11, fill: '#7A6F5C' }} />
             <YAxis tick={{ fontSize: 11, fill: '#7A6F5C' }} />
@@ -1675,6 +1744,7 @@ function CentrosCosto({ activities, progress, modifs, currentUser }) {
                 const color = d.esAcumGeneral ? '#C9A350' : (d.seleccionado ? colorEjecucion(pctMes) : colorEjecucionTenue(pctMes));
                 return <Cell key={i} fill={color} />;
               })}
+              <LabelList dataKey="pctFisLabel" content={PctBarLabel} />
             </Bar>
           </BarChart>
         </ResponsiveContainer>
@@ -1691,19 +1761,9 @@ function CentrosCosto({ activities, progress, modifs, currentUser }) {
               Programado (PIM) vs ejecutado {esAcumuladoHasta ? `— Acumulado a ${MESES[mesFiltro-1].toLowerCase()}` : `— Mes: ${MESES[mesFiltro-1]}`}
             </div>
           </div>
-          <div className="flex gap-4 text-xs">
-            <div>
-              <div className="uppercase tracking-wider" style={{ color: '#7A6F5C' }}>{esAcumuladoHasta ? 'Prog. anual (PIM)' : 'Prog. del mes'}</div>
-              <div className="font-semibold" style={{ color: '#1E2A3A' }}>{fmtMoneyShort(kpiProgFin)}</div>
-            </div>
-            <div>
-              <div className="uppercase tracking-wider" style={{ color: '#7A6F5C' }}>{esAcumuladoHasta ? 'Ejec. acumulada' : 'Ejec. del mes'}</div>
-              <div className="font-semibold" style={{ color: colorEjecucion(ejecFinPct) }}>{fmtMoneyShort(kpiEjecFin)}</div>
-            </div>
-          </div>
         </div>
         <ResponsiveContainer width="100%" height={280}>
-          <BarChart data={data} barCategoryGap="20%" barGap={-30}>
+          <BarChart data={data} barCategoryGap="20%" barGap={-30} margin={{ top: 24, right: 10, left: 0, bottom: 0 }}>
             <CartesianGrid strokeDasharray="3 3" stroke="#E5DDD0" />
             <XAxis dataKey="mes" tick={{ fontSize: 11, fill: '#7A6F5C' }} />
             <YAxis tick={{ fontSize: 11, fill: '#7A6F5C' }} tickFormatter={fmtMillonesEnteros} />
@@ -1720,6 +1780,7 @@ function CentrosCosto({ activities, progress, modifs, currentUser }) {
                 const color = d.esAcumGeneral ? '#C9A350' : (d.seleccionado ? colorEjecucion(pctMes) : colorEjecucionTenue(pctMes));
                 return <Cell key={i} fill={color} />;
               })}
+              <LabelList dataKey="pctFinLabel" content={PctBarLabel} />
             </Bar>
           </BarChart>
         </ResponsiveContainer>
@@ -1989,11 +2050,13 @@ function Programacion({ activities, saveActivities, currentUser, reprogramacione
       nombre: '',
       unidadMedida: '',
       responsable: '',
-      metaAnualFisica: 0,      // física PIA
-      metaAnualFisicaPIM: 0,   // física PIM
+      metaAnualFisica: 0,      // física PIA (auto-calculada)
+      metaAnualFisicaPIM: 0,   // física PIM (auto-calculada)
       presupuestoAnual: 0,
       activo: true,
+      piaBloqueado: false,     // nueva actividad: PIA abierto para registro inicial
       genericas: nuevasGenericas(),
+      fisicaMensual: nuevaFisicaMensual(),
       programacion: Array.from({ length: 12 }, () => ({ fisica: 0, financiera: 0 })),
     });
     setShowForm(true);
@@ -2022,17 +2085,26 @@ function Programacion({ activities, saveActivities, currentUser, reprogramacione
       alert('Código AOI y nombre son obligatorios');
       return;
     }
-    // Sincronizar el campo legado 'programacion' y 'presupuestoAnual' desde las genéricas PIM
-    // (para que Seguimiento, Tableros y Reportes que aún leen 'programacion' funcionen)
+    // Sincronizar el campo legado 'programacion' y totales desde las genéricas/física mensual
     const finalAct = { ...editing };
     if (finalAct.genericas) {
+      // Física anual PIA/PIM se calcula automáticamente desde la física mensual
+      finalAct.metaAnualFisica = totalFisicaActividad(finalAct, 'pia');
+      finalAct.metaAnualFisicaPIM = totalFisicaActividad(finalAct, 'pim');
+      // Sincronizar programacion[] (físico = PIM mensual, financiero = PIM mensual de genéricas)
       const prog = Array.from({ length: 12 }, (_, i) => ({
-        fisica: Number(finalAct.programacion?.[i]?.fisica) || 0,
+        fisica: Number(finalAct.fisicaMensual?.pim?.[i]) || 0,
         financiera: financieroMesActividad(finalAct, 'pim', i),
       }));
       finalAct.programacion = prog;
       finalAct.presupuestoAnual = totalFinancieroActividad(finalAct, 'pim');
       finalAct.presupuestoAnualPIA = totalFinancieroActividad(finalAct, 'pia');
+    }
+    // Al guardar, si el PIA estaba abierto y ya tiene datos, se bloquea automáticamente
+    // para evitar modificaciones involuntarias posteriores.
+    const tienePIA = totalFinancieroActividad(finalAct, 'pia') > 0 || totalFisicaActividad(finalAct, 'pia') > 0;
+    if (finalAct.piaBloqueado !== true && tienePIA) {
+      finalAct.piaBloqueado = true;
     }
     const exists = activities.find(x => x.id === finalAct.id);
     const next = exists ? activities.map(x => x.id === finalAct.id ? finalAct : x) : [...activities, finalAct];
@@ -2315,33 +2387,38 @@ function Programacion({ activities, saveActivities, currentUser, reprogramacione
 }
 
 function ActivityForm({ activity, setActivity, isNew, onSave, onClose, activities = [], areasMap, onAgregarArea, onEliminarArea, canEdit = false }) {
-  // Asegurar estructura de genéricas
-  const act = activity.genericas ? activity : migrarActividadGenericas(activity);
-  if (!activity.genericas) {
-    // Sincronizar una sola vez al abrir
+  // Asegurar estructura de genéricas y física mensual
+  const act = (activity.genericas && activity.fisicaMensual) ? activity : migrarActividadGenericas(activity);
+  if (!activity.genericas || !activity.fisicaMensual) {
     setTimeout(() => setActivity(act), 0);
   }
 
+  const piaBloqueado = activity.piaBloqueado === true;
+
   function update(field, value) { setActivity({ ...activity, [field]: value }); }
 
-  // Actualizar un valor de genérica: gen (código), tipo (pia|pim), mesIdx, valor
+  // Actualizar genérica financiera: si es PIA y está bloqueado, no permite
   function updateGenerica(gen, tipo, mesIdx, value) {
+    if (tipo === 'pia' && piaBloqueado) return;
     const genericas = JSON.parse(JSON.stringify(activity.genericas || nuevasGenericas()));
     if (!genericas[gen]) genericas[gen] = { pia: Array(12).fill(0), pim: Array(12).fill(0) };
     genericas[gen][tipo][mesIdx] = Number(value) || 0;
     setActivity({ ...activity, genericas });
   }
 
-  function updateFisica(idx, value) {
-    const p = [...(activity.programacion || Array.from({ length: 12 }, () => ({ fisica: 0, financiera: 0 })))];
-    p[idx] = { ...p[idx], fisica: Number(value) || 0 };
-    setActivity({ ...activity, programacion: p });
+  // Actualizar física mensual: si es PIA y está bloqueado, no permite
+  function updateFisicaMensual(tipo, mesIdx, value) {
+    if (tipo === 'pia' && piaBloqueado) return;
+    const fm = JSON.parse(JSON.stringify(activity.fisicaMensual || nuevaFisicaMensual()));
+    fm[tipo][mesIdx] = Number(value) || 0;
+    setActivity({ ...activity, fisicaMensual: fm });
   }
 
-  // Totales por tipo
+  // Totales por tipo (auto-calculados, no editables)
   const sumFinPIA = totalFinancieroActividad(activity, 'pia');
   const sumFinPIM = totalFinancieroActividad(activity, 'pim');
-  const sumFis = (activity.programacion || []).reduce((s, m) => s + (Number(m?.fisica) || 0), 0);
+  const sumFisPIA = totalFisicaActividad(activity, 'pia');
+  const sumFisPIM = totalFisicaActividad(activity, 'pim');
 
   // Mapa efectivo de áreas (dinámico si fue pasado por props)
   const _areasMap = areasMap || AREAS_POR_CC;
@@ -2500,51 +2577,108 @@ function ActivityForm({ activity, setActivity, isNew, onSave, onClose, activitie
               </div>
             )}
           </Field>
-          <Field label="Física anual PIA">
-            <input type="number" value={activity.metaAnualFisica} onChange={(e) => update('metaAnualFisica', Number(e.target.value) || 0)} className={inputCls} />
+          <Field label="Física anual PIA (auto)">
+            <input type="number" value={sumFisPIA} readOnly className={inputCls} style={{ background: '#F0E9D9', cursor: 'not-allowed' }} />
           </Field>
-          <Field label="Física anual PIM">
-            <input type="number" value={activity.metaAnualFisicaPIM ?? activity.metaAnualFisica} onChange={(e) => update('metaAnualFisicaPIM', Number(e.target.value) || 0)} className={inputCls} />
+          <Field label="Física anual PIM (auto)">
+            <input type="number" value={sumFisPIM} readOnly className={inputCls} style={{ background: '#FBF1D9', cursor: 'not-allowed', color: '#9C7A2B' }} />
           </Field>
         </div>
 
-        {/* Resumen de totales financieros (calculados de las genéricas) */}
+        {/* Banner de estado del PIA */}
+        <div className="px-6 pb-3">
+          {piaBloqueado ? (
+            <div className="p-3 rounded flex items-center justify-between" style={{ background: '#FBF1D9', border: '1px solid #C9A350' }}>
+              <div className="flex items-center gap-2 text-xs" style={{ color: '#9C7A2B' }}>
+                <Lock size={14} />
+                <span><strong>PIA bloqueado.</strong> La programación PIA (física y financiera) se registra una sola vez al año (enero) y no puede modificarse. Para cambios, solicite apertura.</span>
+              </div>
+              <button type="button"
+                onClick={() => {
+                  if (window.confirm('¿Solicitar apertura del PIA para esta actividad?\n\nEsto registrará una solicitud que debe ser aprobada por un administrador antes de poder editar el PIA.')) {
+                    alert('Solicitud de apertura registrada. Un administrador debe aprobarla en el módulo de Solicitudes.\n\n(Nota: en esta demo, un administrador puede desbloquear directamente con el botón "Desbloquear PIA".)');
+                  }
+                }}
+                className="text-xs px-3 py-1.5 rounded-md font-semibold whitespace-nowrap"
+                style={{ background: '#C9A350', color: '#1E2A3A' }}>
+                <Unlock size={12} className="inline mr-1" /> Solicitar apertura
+              </button>
+            </div>
+          ) : (
+            <div className="p-3 rounded flex items-center justify-between" style={{ background: '#E8F2EC', border: '1px solid #2D7A4E' }}>
+              <div className="flex items-center gap-2 text-xs" style={{ color: '#2D7A4E' }}>
+                <Unlock size={14} />
+                <span><strong>PIA abierto.</strong> Puede registrar la programación PIA inicial. Una vez guardada quedará bloqueada para evitar modificaciones involuntarias.</span>
+              </div>
+            </div>
+          )}
+          {/* El administrador puede bloquear/desbloquear manualmente (demo) */}
+          {canEdit && (
+            <div className="mt-2 flex justify-end">
+              <button type="button"
+                onClick={() => update('piaBloqueado', !piaBloqueado)}
+                className="text-[11px] px-2.5 py-1 rounded font-medium"
+                style={{ background: piaBloqueado ? '#E8F2EC' : '#FBF1D9', color: piaBloqueado ? '#2D7A4E' : '#9C7A2B' }}>
+                {piaBloqueado ? '🔓 Desbloquear PIA (admin)' : '🔒 Bloquear PIA (admin)'}
+              </button>
+            </div>
+          )}
+        </div>
+
+        {/* Resumen de totales financieros (calculados) */}
         <div className="px-6 pb-2 grid grid-cols-2 gap-4">
           <div className="p-3 rounded" style={{ background: '#FAF7F0', border: '1px solid #E5DDD0' }}>
-            <div className="text-[10px] uppercase tracking-wider" style={{ color: '#7A6F5C' }}>Financiera anual PIA</div>
+            <div className="text-[10px] uppercase tracking-wider" style={{ color: '#7A6F5C' }}>Financiera anual PIA (auto)</div>
             <div className="text-lg font-bold" style={{ color: '#1E2A3A' }}>S/ {fmtDecimal(sumFinPIA)}</div>
           </div>
           <div className="p-3 rounded" style={{ background: '#FBF1D9', border: '1px solid #C9A350' }}>
-            <div className="text-[10px] uppercase tracking-wider" style={{ color: '#9C7A2B' }}>Financiera anual PIM</div>
+            <div className="text-[10px] uppercase tracking-wider" style={{ color: '#9C7A2B' }}>Financiera anual PIM (auto)</div>
             <div className="text-lg font-bold" style={{ color: '#9C7A2B' }}>S/ {fmtDecimal(sumFinPIM)}</div>
           </div>
         </div>
 
-        {/* Programación física mensual */}
+        {/* Programación física mensual PIA y PIM */}
         <div className="px-6 pb-2">
-          <div className="text-xs uppercase tracking-widest mb-3" style={{ color: '#9C7A2B' }}>Programación física mensual</div>
+          <div className="text-xs uppercase tracking-widest mb-1" style={{ color: '#9C7A2B' }}>Programación física mensual</div>
+          <div className="text-[11px] mb-3" style={{ color: '#7A6F5C' }}>La fila PIA es la programación original (se bloquea tras el registro inicial). La fila PIM es la vigente y se modifica con las reprogramaciones.</div>
         </div>
         <div className="px-6 pb-4">
           <div className="overflow-x-auto rounded-md border" style={{ borderColor: '#E5DDD0' }}>
             <table className="w-full text-sm">
               <thead>
                 <tr style={{ background: '#F0E9D9' }}>
+                  <th className="text-left px-2 py-2 text-[10px] uppercase" style={{ color: '#7A6F5C' }}>Tipo</th>
                   {MESES_ABR.map((m, i) => (
-                    <th key={i} className="text-center px-2 py-2 text-[10px] uppercase" style={{ color: '#7A6F5C' }}>{m}</th>
+                    <th key={i} className="text-center px-1 py-2 text-[10px] uppercase" style={{ color: '#7A6F5C' }}>{m}</th>
                   ))}
                   <th className="text-center px-2 py-2 text-[10px] uppercase" style={{ color: '#1E2A3A', background: '#E5DDD0' }}>Total</th>
                 </tr>
               </thead>
               <tbody>
                 <tr>
+                  <td className="px-2 py-1 text-[11px] font-semibold" style={{ color: '#7A6F5C' }}>PIA</td>
                   {MESES.map((m, i) => (
-                    <td key={i} className="px-1 py-1.5">
-                      <input type="number" value={activity.programacion?.[i]?.fisica ?? 0}
-                        onChange={(e) => updateFisica(i, e.target.value)}
-                        className="w-full text-right px-1 py-1 rounded border text-xs" style={{ borderColor: '#E5DDD0' }} />
+                    <td key={i} className="px-0.5 py-1">
+                      <input type="number" value={activity.fisicaMensual?.pia?.[i] ?? 0}
+                        onChange={(e) => updateFisicaMensual('pia', i, e.target.value)}
+                        readOnly={piaBloqueado}
+                        className="w-full text-right px-1 py-1 rounded border text-[11px]"
+                        style={{ borderColor: '#E5DDD0', background: piaBloqueado ? '#F0E9D9' : '#FFF', cursor: piaBloqueado ? 'not-allowed' : 'text' }} />
                     </td>
                   ))}
-                  <td className="px-2 py-1.5 text-right text-xs font-bold" style={{ color: '#1E2A3A', background: '#FAF7F0' }}>{fmtEntero(sumFis)}</td>
+                  <td className="px-2 py-1 text-right text-[11px] font-bold" style={{ color: '#1E2A3A', background: '#FAF7F0' }}>{fmtEntero(sumFisPIA)}</td>
+                </tr>
+                <tr>
+                  <td className="px-2 py-1 text-[11px] font-semibold" style={{ color: '#9C7A2B' }}>PIM</td>
+                  {MESES.map((m, i) => (
+                    <td key={i} className="px-0.5 py-1">
+                      <input type="number" value={activity.fisicaMensual?.pim?.[i] ?? 0}
+                        onChange={(e) => updateFisicaMensual('pim', i, e.target.value)}
+                        className="w-full text-right px-1 py-1 rounded border text-[11px]"
+                        style={{ borderColor: '#C9A350', background: '#FFFDF7' }} />
+                    </td>
+                  ))}
+                  <td className="px-2 py-1 text-right text-[11px] font-bold" style={{ color: '#9C7A2B', background: '#FBF1D9' }}>{fmtEntero(sumFisPIM)}</td>
                 </tr>
               </tbody>
             </table>
@@ -2554,7 +2688,7 @@ function ActivityForm({ activity, setActivity, isNew, onSave, onClose, activitie
         {/* Programación financiera por genérica de gasto */}
         <div className="px-6 pb-2">
           <div className="text-xs uppercase tracking-widest mb-1" style={{ color: '#9C7A2B' }}>Programación financiera por genérica de gasto</div>
-          <div className="text-[11px] mb-3" style={{ color: '#7A6F5C' }}>Ingresa los importes con decimales. Cada genérica tiene su columna PIA (original) y PIM (modificable).</div>
+          <div className="text-[11px] mb-3" style={{ color: '#7A6F5C' }}>Ingresa los importes con decimales. La fila PIA se bloquea tras el registro inicial; la fila PIM es modificable.</div>
         </div>
         <div className="px-6 pb-4 space-y-4">
           {GENERICAS_GASTO.map(gen => {
@@ -2584,7 +2718,9 @@ function ActivityForm({ activity, setActivity, isNew, onSave, onClose, activitie
                           <td key={i} className="px-0.5 py-1">
                             <input type="number" step="0.01" value={activity.genericas?.[gen.codigo]?.pia?.[i] ?? 0}
                               onChange={(e) => updateGenerica(gen.codigo, 'pia', i, e.target.value)}
-                              className="w-full text-right px-1 py-1 rounded border text-[11px]" style={{ borderColor: '#E5DDD0' }} />
+                              readOnly={piaBloqueado}
+                              className="w-full text-right px-1 py-1 rounded border text-[11px]"
+                              style={{ borderColor: '#E5DDD0', background: piaBloqueado ? '#F0E9D9' : '#FFF', cursor: piaBloqueado ? 'not-allowed' : 'text' }} />
                           </td>
                         ))}
                         <td className="px-2 py-1 text-right text-[11px] font-bold" style={{ color: '#1E2A3A', background: '#FAF7F0' }}>{fmtEntero(totPIA)}</td>
@@ -2882,6 +3018,58 @@ function Seguimiento({ activities, progress, saveProgress, periodos, solicitudes
   const bloqueado = periodoInfo.estado === 'cerrado' || periodoInfo.estado === 'por_abrir';
   const lector = esLector(currentUser);
 
+  // Exportar el seguimiento a Excel (CSV compatible con Excel)
+  function exportarSeguimientoExcel() {
+    // Actividades visibles para el usuario (respeta permisos)
+    const actsExport = esResponsableCC(currentUser)
+      ? filtrarActividadesUsuario(activities, currentUser)
+      : activities;
+
+    const rows = [];
+    rows.push(['CC', 'Área', 'Cód. AOI', 'Actividad', 'Unidad', 'Año', 'Mes',
+      'Físico programado', 'Físico ejecutado', '% Físico',
+      'Financiero programado', 'Financiero ejecutado', '% Financiero',
+      'Logros', 'Limitaciones', 'Medidas adoptadas']);
+
+    actsExport.forEach(a => {
+      const act = a.genericas ? a : migrarActividadGenericas(a);
+      for (let m = 1; m <= 12; m++) {
+        const reg = progress.find(p => p.actividadId === a.id && p.anio === year && p.mes === m);
+        // Solo exportar meses con registro o con programación
+        const progFis = Number(a.programacion?.[m-1]?.fisica) || 0;
+        const progFin = financieroMesActividad(act, 'pim', m - 1);
+        if (!reg && progFis === 0 && progFin === 0) continue;
+        const ejecFis = reg ? Number(reg.avanceFisico) || 0 : 0;
+        const ejecFin = reg ? Number(reg.avanceFinanciero) || 0 : 0;
+        rows.push([
+          a.centroCosto, a.area || '', a.codigoAOI, a.nombre, a.unidadMedida || '',
+          year, MESES[m-1],
+          progFis.toFixed(0), ejecFis.toFixed(0), progFis > 0 ? ((ejecFis/progFis)*100).toFixed(1)+'%' : '0%',
+          progFin.toFixed(2), ejecFin.toFixed(2), progFin > 0 ? ((ejecFin/progFin)*100).toFixed(1)+'%' : '0%',
+          reg?.logros || '', reg?.limitaciones || '', reg?.medidas || '',
+        ]);
+      }
+    });
+
+    const csv = '\ufeff' + rows.map(r =>
+      r.map(c => {
+        const s = String(c).replace(/"/g, '""');
+        return /[;"\n]/.test(s) ? `"${s}"` : s;
+      }).join(';')
+    ).join('\n');
+
+    const blob = new Blob([csv], { type: 'text/csv;charset=utf-8;' });
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement('a');
+    link.href = url;
+    link.download = `Seguimiento_POI_${year}.csv`;
+    document.body.appendChild(link);
+    link.click();
+    document.body.removeChild(link);
+    URL.revokeObjectURL(url);
+    if (logAuditoria) logAuditoria('exportar_seguimiento', `Exportó el seguimiento POI ${year} a Excel`, {});
+  }
+
   // Áreas del CC seleccionado, filtradas por las áreas permitidas al usuario
   // Solo considera actividades activas
   const areas = useMemo(() => {
@@ -3032,7 +3220,14 @@ function Seguimiento({ activities, progress, saveProgress, periodos, solicitudes
 
   return (
     <>
-      <PageHeader title="Seguimiento mensual" subtitle="Logros, limitaciones y medidas adoptadas" />
+      <PageHeader title="Seguimiento mensual" subtitle="Logros, limitaciones y medidas adoptadas"
+        action={
+          <button onClick={exportarSeguimientoExcel}
+            className="flex items-center gap-2 px-4 py-2.5 rounded-md text-sm font-semibold transition-colors"
+            style={{ background: '#1F7A4D', color: '#FFFFFF' }}>
+            <FileSpreadsheet size={16} /> Exportar a Excel
+          </button>
+        } />
 
       {/* Paso 1: Centro de costo */}
       <Card className="p-5 mb-4">
