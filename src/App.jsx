@@ -1367,6 +1367,7 @@ function Dashboard({ activities, progress, modifs, currentUser }) {
               {chartData.map((d, i) => (
                 <Cell key={i} fill={d.esAcumGeneral ? '#1E2A3A' : (d.seleccionado ? '#8A8A8A' : '#C9C9C9')} />
               ))}
+              <LabelList dataKey="pctFinLabel" content={PctBarLabel} />
             </Bar>
             <Bar dataKey="Ejecutado" name="Ejecutado" radius={[3, 3, 0, 0]} barSize={22}>
               {chartData.map((d, i) => {
@@ -1374,7 +1375,6 @@ function Dashboard({ activities, progress, modifs, currentUser }) {
                 const color = d.esAcumGeneral ? '#C9A350' : (d.seleccionado ? colorEjecucion(pctMes) : colorEjecucionTenue(pctMes));
                 return <Cell key={i} fill={color} />;
               })}
-              <LabelList dataKey="pctFinLabel" content={PctBarLabel} />
             </Bar>
           </BarChart>
         </ResponsiveContainer>
@@ -1401,6 +1401,7 @@ function Dashboard({ activities, progress, modifs, currentUser }) {
               {chartData.map((d, i) => (
                 <Cell key={i} fill={d.esAcumGeneral ? '#1E2A3A' : (d.seleccionado ? '#8A8A8A' : '#C9C9C9')} />
               ))}
+              <LabelList dataKey="pctFisLabel" content={PctBarLabel} />
             </Bar>
             <Bar dataKey="EjecFis" name="Ejecutado" radius={[3, 3, 0, 0]} barSize={22}>
               {chartData.map((d, i) => {
@@ -1408,7 +1409,6 @@ function Dashboard({ activities, progress, modifs, currentUser }) {
                 const color = d.esAcumGeneral ? '#C9A350' : (d.seleccionado ? colorEjecucion(pctMes) : colorEjecucionTenue(pctMes));
                 return <Cell key={i} fill={color} />;
               })}
-              <LabelList dataKey="pctFisLabel" content={PctBarLabel} />
             </Bar>
           </BarChart>
         </ResponsiveContainer>
@@ -1737,6 +1737,7 @@ function CentrosCosto({ activities, progress, modifs, currentUser }) {
               {data.map((d, i) => (
                 <Cell key={i} fill={d.esAcumGeneral ? '#1E2A3A' : (d.seleccionado ? '#8A8A8A' : '#C9C9C9')} />
               ))}
+              <LabelList dataKey="pctFisLabel" content={PctBarLabel} />
             </Bar>
             <Bar dataKey="ejecFis" name="Ejecutado" radius={[3, 3, 0, 0]} barSize={22}>
               {data.map((d, i) => {
@@ -1744,7 +1745,6 @@ function CentrosCosto({ activities, progress, modifs, currentUser }) {
                 const color = d.esAcumGeneral ? '#C9A350' : (d.seleccionado ? colorEjecucion(pctMes) : colorEjecucionTenue(pctMes));
                 return <Cell key={i} fill={color} />;
               })}
-              <LabelList dataKey="pctFisLabel" content={PctBarLabel} />
             </Bar>
           </BarChart>
         </ResponsiveContainer>
@@ -1773,6 +1773,7 @@ function CentrosCosto({ activities, progress, modifs, currentUser }) {
               {data.map((d, i) => (
                 <Cell key={i} fill={d.esAcumGeneral ? '#1E2A3A' : (d.seleccionado ? '#8A8A8A' : '#C9C9C9')} />
               ))}
+              <LabelList dataKey="pctFinLabel" content={PctBarLabel} />
             </Bar>
             <Bar dataKey="ejecFin" name="Ejecutado" radius={[3, 3, 0, 0]} barSize={22}>
               {data.map((d, i) => {
@@ -1780,7 +1781,6 @@ function CentrosCosto({ activities, progress, modifs, currentUser }) {
                 const color = d.esAcumGeneral ? '#C9A350' : (d.seleccionado ? colorEjecucion(pctMes) : colorEjecucionTenue(pctMes));
                 return <Cell key={i} fill={color} />;
               })}
-              <LabelList dataKey="pctFinLabel" content={PctBarLabel} />
             </Bar>
           </BarChart>
         </ResponsiveContainer>
