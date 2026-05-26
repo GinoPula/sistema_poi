@@ -1837,6 +1837,9 @@ function Dashboard({ activities, progress, modifs, currentUser }) {
     pctFis: pFisAcum,
     pctFinLabel: totalEjecFinAnual > 0 ? `${pFinAcum.toFixed(0)}%` : '',
     pctFisLabel: totalEjecFisAnual > 0 ? `${pFisAcum.toFixed(0)}%` : '',
+    // Labels para la barra Programado del ACUM (siempre visible, aunque ejecucion sea 0)
+    acumFinLabel: `${pFinAcum.toFixed(0)}%`,
+    acumFisLabel: `${pFisAcum.toFixed(0)}%`,
     seleccionado: true,
     esAcumGeneral: true,
   });
@@ -1946,6 +1949,7 @@ function Dashboard({ activities, progress, modifs, currentUser }) {
               {chartData.map((d, i) => (
                 <Cell key={i} fill={d.esAcumGeneral ? '#1E2A3A' : (d.seleccionado ? '#8A8A8A' : '#C9C9C9')} />
               ))}
+              <LabelList dataKey="acumFinLabel" content={PctBarLabel} />
             </Bar>
             <Bar dataKey="Ejecutado" name="Ejecutado" radius={[3, 3, 0, 0]} barSize={22}>
               {chartData.map((d, i) => {
@@ -1980,6 +1984,7 @@ function Dashboard({ activities, progress, modifs, currentUser }) {
               {chartData.map((d, i) => (
                 <Cell key={i} fill={d.esAcumGeneral ? '#1E2A3A' : (d.seleccionado ? '#8A8A8A' : '#C9C9C9')} />
               ))}
+              <LabelList dataKey="acumFisLabel" content={PctBarLabel} />
             </Bar>
             <Bar dataKey="EjecFis" name="Ejecutado" radius={[3, 3, 0, 0]} barSize={22}>
               {chartData.map((d, i) => {
@@ -2186,6 +2191,9 @@ function CentrosCosto({ activities, progress, modifs, currentUser }) {
     pctFis: totProgFisAnualCC > 0 ? (totEjecFisAnualCC / totProgFisAnualCC) * 100 : 0,
     pctFinLabel: totEjecFinAnualCC > 0 ? `${(totProgFinAnualCC > 0 ? (totEjecFinAnualCC / totProgFinAnualCC) * 100 : 0).toFixed(0)}%` : '',
     pctFisLabel: totEjecFisAnualCC > 0 ? `${(totProgFisAnualCC > 0 ? (totEjecFisAnualCC / totProgFisAnualCC) * 100 : 0).toFixed(0)}%` : '',
+    // Labels para la barra Programado del ACUM
+    acumFinLabel: `${(totProgFinAnualCC > 0 ? (totEjecFinAnualCC / totProgFinAnualCC) * 100 : 0).toFixed(0)}%`,
+    acumFisLabel: `${(totProgFisAnualCC > 0 ? (totEjecFisAnualCC / totProgFisAnualCC) * 100 : 0).toFixed(0)}%`,
     seleccionado: true,
     esAcumGeneral: true,
   });
@@ -2316,6 +2324,7 @@ function CentrosCosto({ activities, progress, modifs, currentUser }) {
               {data.map((d, i) => (
                 <Cell key={i} fill={d.esAcumGeneral ? '#1E2A3A' : (d.seleccionado ? '#8A8A8A' : '#C9C9C9')} />
               ))}
+              <LabelList dataKey="acumFisLabel" content={PctBarLabel} />
             </Bar>
             <Bar dataKey="ejecFis" name="Ejecutado" radius={[3, 3, 0, 0]} barSize={22}>
               {data.map((d, i) => {
@@ -2352,6 +2361,7 @@ function CentrosCosto({ activities, progress, modifs, currentUser }) {
               {data.map((d, i) => (
                 <Cell key={i} fill={d.esAcumGeneral ? '#1E2A3A' : (d.seleccionado ? '#8A8A8A' : '#C9C9C9')} />
               ))}
+              <LabelList dataKey="acumFinLabel" content={PctBarLabel} />
             </Bar>
             <Bar dataKey="ejecFin" name="Ejecutado" radius={[3, 3, 0, 0]} barSize={22}>
               {data.map((d, i) => {
@@ -3980,8 +3990,9 @@ function Seguimiento({ activities, progress, saveProgress, periodos, solicitudes
         totFinProgAnual += finProgAnual; totFinEjecAcum += finEjecAcum;
         totFisProgAnual += fisProgAnual; totFisEjecAcum += fisEjecAcum;
 
-        // Encabezado de la actividad
-        cuerpo += `<tr class="act"><td class="reg">${a.codigoRegistro || ''}</td><td class="reg">${a.codigoAOI || ''}</td><td class="nom" colspan="${13}">${a.nombre || ''}</td><td class="um">${a.unidadMedida || ''}</td><td class="um"></td></tr>`;
+        // Encabezado de la actividad (unidad de medida inline tras el nombre)
+        const umBadge = a.unidadMedida ? `&nbsp;<span class="um-inline">[${a.unidadMedida}]</span>` : '';
+        cuerpo += `<tr class="act"><td class="reg">${a.codigoRegistro || ''}</td><td class="reg">${a.codigoAOI || ''}</td><td class="nom" colspan="${13}">${a.nombre || ''}${umBadge}</td><td class="um" colspan="2"></td></tr>`;
 
         // Fila FÍSICO Programado / Ejecutado
         const celdasFisProg = fisProg.map(v => `<td class="n">${fmt0(v)}</td>`).join('');
@@ -4060,6 +4071,7 @@ function Seguimiento({ activities, progress, saveProgress, periodos, solicitudes
       tr.fin .rot { color: #9C7A2B; }
       tr.act td { background: #EFE7D5; font-weight: bold; }
       tr.act .nom { white-space: normal; }
+      .um-inline { font-size: 7px; font-weight: normal; color: #7A6F5C; padding: 1px 3px; background: #FBF6E9; border-radius: 2px; }
       tr.oei td { background: #1E2A3A; color: #fff; font-size: 8px; }
       tr.aei td { background: #6E6450; color: #fff; font-size: 7.5px; }
       tr.oei .lbl, tr.aei .lbl { text-align: center; background: rgba(0,0,0,0.15); }
@@ -6601,6 +6613,100 @@ function ReportSection({ num, title, children }) {
   );
 }
 
+// Detecta si un texto contiene una tabla pipe-delimited (formato Markdown) y la renderiza como tabla HTML.
+// Si no tiene estructura de tabla, retorna el texto como párrafo.
+function RenderTextoOTabla({ texto }) {
+  if (!texto) return <em style={{ color: '#9C9080' }}>Sin registro para el periodo.</em>;
+
+  // Detectar si hay pipes como separadores de tabla
+  const lineas = texto.split(/\|/).length > 3;
+  if (!lineas) return <span className="text-sm" style={{ color: '#1E2A3A' }}>{texto}</span>;
+
+  // Intentar parsear como tabla Markdown-like: "col1 | col2 | col3 | ..."
+  // Separar por " | " o "|" con opción de espacios alrededor
+  const partes = texto.split(/\s*\|\s*/);
+  if (partes.length < 4) return <span className="text-sm" style={{ color: '#1E2A3A' }}>{texto}</span>;
+
+  // Buscar la estructura: puede venir como texto continuo con | como separador de celdas
+  // y filas separadas por secuencias "|| " o " |" seguido de un patrón numérico/fecha
+  // Estrategia: dividir por patrones que parecen inicio de fila (número | o fecha |)
+
+  // Limpiar: quitar caracteres de nueva línea y normalizar pipes
+  const txtClean = texto.replace(/\n/g, ' | ').trim();
+
+  // Dividir en tokens por pipe
+  const tokens = txtClean.split('|').map(t => t.trim()).filter((t, i, arr) => {
+    // Eliminar tokens que son solo guiones (separadores de header)
+    return !/^[-\s]+$/.test(t);
+  });
+
+  if (tokens.length < 4) return <span className="text-sm" style={{ color: '#1E2A3A' }}>{texto}</span>;
+
+  // Detectar si el primer token podría ser un encabezado (si hay tokens "---")
+  const rawTokens = txtClean.split('|').map(t => t.trim());
+  const sepIdx = rawTokens.findIndex(t => /^[-\s]+$/.test(t) && t.length > 0);
+
+  // Si encontramos separadores de header, el encabezado está antes del primer separador
+  let headers = [], filas = [];
+
+  if (sepIdx > 0) {
+    // Contar columnas buscando cuántos tokens hay antes del primer separador
+    // Los separadores son todos los tokens que sean "---"
+    const cleanTokens = rawTokens.filter(t => !/^[-\s]+$/.test(t) || t === '');
+    // Determinar número de columnas: cantidad de tokens antes del primer grupo de "---"
+    const firstSepGroup = rawTokens.indexOf(rawTokens.find(t => /^[-\s]+$/.test(t) && t.length >= 1));
+    const numCols = firstSepGroup > 0 ? firstSepGroup : Math.round(cleanTokens.length / 2);
+
+    if (numCols >= 2 && numCols <= 10) {
+      const cleanAll = rawTokens.filter(t => !/^[-\s]+$/.test(t));
+      headers = cleanAll.slice(0, numCols);
+      const rest = cleanAll.slice(numCols);
+      for (let i = 0; i < rest.length; i += numCols) {
+        filas.push(rest.slice(i, i + numCols));
+      }
+    }
+  } else {
+    // Sin separador de header evidente: tratar todo como datos con la primera fila como encabezado
+    const numCols = Math.max(2, Math.round(tokens.length / Math.ceil(tokens.length / 5)));
+    headers = tokens.slice(0, numCols);
+    const rest = tokens.slice(numCols);
+    for (let i = 0; i < rest.length; i += numCols) {
+      filas.push(rest.slice(i, i + numCols));
+    }
+  }
+
+  if (headers.length < 2 || filas.length === 0) {
+    return <span className="text-sm" style={{ color: '#1E2A3A' }}>{texto}</span>;
+  }
+
+  return (
+    <div className="overflow-x-auto mt-1">
+      <table className="w-full text-xs" style={{ borderCollapse: 'collapse', border: '1px solid #E5DDD0' }}>
+        <thead>
+          <tr style={{ background: '#1E2A3A' }}>
+            {headers.map((h, i) => (
+              <th key={i} className="px-2 py-1.5 text-left font-semibold" style={{ color: '#F5F1E8', border: '1px solid #3D4F65', whiteSpace: 'nowrap' }}>
+                {h}
+              </th>
+            ))}
+          </tr>
+        </thead>
+        <tbody>
+          {filas.map((fila, ri) => (
+            <tr key={ri} style={{ background: ri % 2 === 0 ? '#FAF7F0' : '#FFFFFF' }}>
+              {Array.from({ length: headers.length }, (_, ci) => (
+                <td key={ci} className="px-2 py-1.5" style={{ border: '1px solid #E5DDD0', color: '#1E2A3A', verticalAlign: 'top' }}>
+                  {fila[ci] || ''}
+                </td>
+              ))}
+            </tr>
+          ))}
+        </tbody>
+      </table>
+    </div>
+  );
+}
+
 function ActividadBloque({ actividad, registros, campo, mesesIncluir }) {
   return (
     <div className="mb-5">
@@ -6615,9 +6721,7 @@ function ActividadBloque({ actividad, registros, campo, mesesIncluir }) {
           return (
             <div key={m}>
               <span className="text-xs font-semibold" style={{ color: '#9C7A2B' }}>{MESES[m - 1]}: </span>
-              <span className="text-sm" style={{ color: '#1E2A3A' }}>
-                {r?.[campo] || <em style={{ color: '#9C9080' }}>Sin registro para el periodo.</em>}
-              </span>
+              <RenderTextoOTabla texto={r?.[campo] || ''} />
             </div>
           );
         })}
