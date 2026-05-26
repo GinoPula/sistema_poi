@@ -3990,9 +3990,8 @@ function Seguimiento({ activities, progress, saveProgress, periodos, solicitudes
         totFinProgAnual += finProgAnual; totFinEjecAcum += finEjecAcum;
         totFisProgAnual += fisProgAnual; totFisEjecAcum += fisEjecAcum;
 
-        // Encabezado de la actividad (unidad de medida inline tras el nombre)
-        const umBadge = a.unidadMedida ? `&nbsp;<span class="um-inline">[${a.unidadMedida}]</span>` : '';
-        cuerpo += `<tr class="act"><td class="reg">${a.codigoRegistro || ''}</td><td class="reg">${a.codigoAOI || ''}</td><td class="nom" colspan="${13}">${a.nombre || ''}${umBadge}</td><td class="um" colspan="2"></td></tr>`;
+        // Encabezado de la actividad: nombre (colspan=12 meses) + UM en columna Acum. + vacío en % Acum.
+        cuerpo += `<tr class="act"><td class="reg">${a.codigoRegistro || ''}</td><td class="reg">${a.codigoAOI || ''}</td><td class="nom" colspan="12">${a.nombre || ''}</td><td class="um-cell">${a.unidadMedida || ''}</td><td></td></tr>`;
 
         // Fila FÍSICO Programado / Ejecutado
         const celdasFisProg = fisProg.map(v => `<td class="n">${fmt0(v)}</td>`).join('');
@@ -4071,7 +4070,7 @@ function Seguimiento({ activities, progress, saveProgress, periodos, solicitudes
       tr.fin .rot { color: #9C7A2B; }
       tr.act td { background: #EFE7D5; font-weight: bold; }
       tr.act .nom { white-space: normal; }
-      .um-inline { font-size: 7px; font-weight: normal; color: #7A6F5C; padding: 1px 3px; background: #FBF6E9; border-radius: 2px; }
+      td.um-cell { text-align: center; font-weight: bold; font-size: 8px; color: #1E2A3A; background: #FBF6E9; border: 2px solid #9C7A2B !important; }
       tr.oei td { background: #1E2A3A; color: #fff; font-size: 8px; }
       tr.aei td { background: #6E6450; color: #fff; font-size: 7.5px; }
       tr.oei .lbl, tr.aei .lbl { text-align: center; background: rgba(0,0,0,0.15); }
